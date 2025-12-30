@@ -84,13 +84,23 @@ class ComixAPI:
             
             for chap in items:
                 group = chap.get("scanlation_group")
+                is_official = chap.get("is_official", 0)
+                
+                # Determine group name: prefer scanlation_group, then check is_official
+                if group:
+                    group_name = group["name"]
+                elif is_official:
+                    group_name = "Official"
+                else:
+                    group_name = None
+                
                 chapters.append(Chapter(
                     chapter_id=chap["chapter_id"],
                     number=chap["number"],
-                    title=chap.get("title"),
+                    title=chap.get("name") or chap.get("title"),  # API uses 'name' field
                     volume=chap.get("volume"),
                     votes=chap.get("votes"),
-                    group_name=group["name"] if group else None,
+                    group_name=group_name,
                     pages_count=chap.get("pages_count", 0)
                 ))
             page += 1

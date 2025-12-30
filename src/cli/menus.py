@@ -58,12 +58,12 @@ class MainMenu:
 
 
 class ChapterSelector:
-    """Chapter selection menu."""
+    """Chapter selection menu with scanlator grouping."""
     
     @staticmethod
     def select_chapters(chapters: list[Chapter]) -> list[Chapter]:
         """
-        Prompt user to select chapters.
+        Prompt user to select chapters with scanlator preference.
         
         Supports:
         - Single: "5"
@@ -84,34 +84,137 @@ class ChapterSelector:
             ).strip().lower()
             
             if selection == "all":
-                if Confirm.ask(
-                    f"[yellow]Download all {len(chapters)} chapters?[/]",
-                    default=True
-                ):
-                    return chapters
+                # For "all", still need to group and ask for scanlator
+                grouped = ChapterSelector._group_by_number(chapters)
+                scanlators = ChapterSelector._get_all_scanlators(chapters)
+                
+                if len(scanlators) > 1:
+                    preferred = ChapterSelector._select_scanlator(scanlators)
+                    filtered = ChapterSelector._filter_by_scanlator(grouped, preferred)
+                else:
+                    filtered = [chs[0] for chs in grouped.values()]
+                
+                console.print(f"[green]Selected {len(filtered)} unique chapter(s)[/]")
+                if Confirm.ask(f"[yellow]Download {len(filtered)} chapters?[/]", default=True):
+                    return sorted(filtered, key=lambda c: (float(c.number) if str(c.number).replace('.','').isdigit() else 0))
                 continue
             
             try:
-                selected = ChapterSelector._parse_selection(selection, chapters)
-                if selected:
+                # Parse the selection to get chapter numbers requested
+                selected_raw = ChapterSelector._parse_selection(selection, chapters)
+                
+                if selected_raw:
+                    # Group selected chapters by number
+                    grouped = ChapterSelector._group_by_number(selected_raw)
+                    
+                    # Get unique scanlators from selected chapters
+                    scanlators = ChapterSelector._get_all_scanlators(selected_raw)
+                    
+                    if len(scanlators) > 1:
+                        console.print(f"\n[yellow]Found {len(grouped)} unique chapters with multiple scanlator versions[/]")
+                        preferred = ChapterSelector._select_scanlator(scanlators)
+                        filtered = ChapterSelector._filter_by_scanlator(grouped, preferred)
+                    else:
+                        filtered = [chs[0] for chs in grouped.values()]
+                    
                     console.print(
-                        f"[green]Selected {len(selected)} chapter(s): "
-                        f"{', '.join(str(c.number) for c in selected[:5])}"
-                        f"{'...' if len(selected) > 5 else ''}[/]"
+                        f"[green]Selected {len(filtered)} chapter(s): "
+                        f"{', '.join(str(c.number) for c in filtered[:5])}"
+                        f"{'...' if len(filtered) > 5 else ''}[/]"
                     )
                     if Confirm.ask("[cyan]Proceed with download?[/]", default=True):
-                        return selected
+                        return sorted(filtered, key=lambda c: (float(c.number) if str(c.number).replace('.','').isdigit() else 0))
                 else:
                     console.print("[red]No valid chapters selected. Try again.[/]")
             except ValueError as e:
                 console.print(f"[red]Invalid selection: {e}[/]")
     
     @staticmethod
+    def _group_by_number(chapters: list[Chapter]) -> dict[str, list[Chapter]]:
+        """Group chapters by their chapter number."""
+        grouped: dict[str, list[Chapter]] = {}
+        for ch in chapters:
+            num = str(ch.number)
+            if num not in grouped:
+                grouped[num] = []
+            grouped[num].append(ch)
+        return grouped
+    
+    @staticmethod
+    def _get_all_scanlators(chapters: list[Chapter]) -> list[str]:
+        """Extract all unique scanlator names from chapters."""
+        scanlators = set()
+        for ch in chapters:
+            if ch.group_name:
+                scanlators.add(ch.group_name)
+        # Sort alphabetically, add "Any (first available)" option
+        return sorted(list(scanlators))
+    
+    @staticmethod
+    def _select_scanlator(scanlators: list[str]) -> str | None:
+        """Prompt user to select preferred scanlator."""
+        from rich.table import Table
+        
+        console.print("\n[bold magenta]🎨 Multiple Scanlators Available[/]")
+        
+        table = Table(box=box.ROUNDED, border_style="cyan")
+        table.add_column("#", style="dim", width=4)
+        table.add_column("Scanlator Group", style="white")
+        
+        table.add_row("0", "[dim]Any (first available)[/]")
+        for idx, name in enumerate(scanlators, 1):
+            table.add_row(str(idx), name)
+        
+        console.print(table)
+        
+        choices = ["0"] + [str(i) for i in range(1, len(scanlators) + 1)]
+        choice = Prompt.ask(
+            "\n[bold cyan]Select preferred scanlator[/]",
+            choices=choices,
+            default="0"
+        )
+        
+        if choice == "0":
+            return None  # Any/first available
+        else:
+            return scanlators[int(choice) - 1]
+    
+    @staticmethod
+    def _filter_by_scanlator(
+        grouped: dict[str, list[Chapter]], 
+        preferred: str | None
+    ) -> list[Chapter]:
+        """Filter to one chapter per number based on scanlator preference."""
+        result = []
+        
+        for num, chs in grouped.items():
+            if preferred:
+                # Look for preferred scanlator first
+                for ch in chs:
+                    if ch.group_name == preferred:
+                        result.append(ch)
+                        break
+                else:
+                    # Fallback to first available if preferred not found
+                    result.append(chs[0])
+            else:
+                # No preference - pick first (usually has most votes)
+                result.append(chs[0])
+        
+        return result
+    
+    @staticmethod
     def _parse_selection(selection: str, chapters: list[Chapter]) -> list[Chapter]:
         """Parse chapter selection string."""
-        # Create a mapping from chapter number to chapter object
-        chapter_map = {str(ch.number): ch for ch in chapters}
-        # Also create index-based mapping (1-indexed)
+        # Create a mapping from chapter number to ALL chapters with that number
+        chapter_by_num: dict[str, list[Chapter]] = {}
+        for ch in chapters:
+            num = str(ch.number)
+            if num not in chapter_by_num:
+                chapter_by_num[num] = []
+            chapter_by_num[num].append(ch)
+        
+        # Index-based mapping (1-indexed)
         index_map = {str(i): ch for i, ch in enumerate(chapters, 1)}
         
         selected = []
@@ -122,39 +225,32 @@ class ChapterSelector:
                 # Range selection
                 start_str, end_str = part.split("-", 1)
                 
-                # Try as index first, then as chapter number
                 try:
-                    start = int(start_str)
-                    end = int(end_str)
+                    start = float(start_str)
+                    end = float(end_str)
                     
-                    # Check if these are indices
-                    if str(start) in index_map and str(end) in index_map:
-                        for i in range(start, end + 1):
-                            if str(i) in index_map:
-                                selected.append(index_map[str(i)])
-                    else:
-                        # Try as chapter numbers
-                        for ch in chapters:
-                            try:
-                                ch_num = float(ch.number)
-                                if start <= ch_num <= end:
-                                    selected.append(ch)
-                            except (ValueError, TypeError):
-                                pass
+                    # Select ALL chapters whose number falls in the range
+                    for ch in chapters:
+                        try:
+                            ch_num = float(ch.number)
+                            if start <= ch_num <= end:
+                                selected.append(ch)
+                        except (ValueError, TypeError):
+                            pass
                 except ValueError:
                     raise ValueError(f"Invalid range: {part}")
             else:
-                # Single selection - try index first, then chapter number
-                if part in index_map:
+                # Single selection - by chapter number
+                if part in chapter_by_num:
+                    # Add ALL versions of this chapter number
+                    selected.extend(chapter_by_num[part])
+                elif part in index_map:
                     selected.append(index_map[part])
-                elif part in chapter_map:
-                    selected.append(chapter_map[part])
                 else:
-                    # Try to match chapter number more flexibly
+                    # Try to match flexibly
                     for ch in chapters:
                         if str(ch.number) == part:
                             selected.append(ch)
-                            break
         
         # Remove duplicates while preserving order
         seen = set()
