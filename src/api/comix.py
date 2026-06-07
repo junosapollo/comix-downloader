@@ -2,6 +2,7 @@
 Comix.to API wrapper for manga information and chapter data using Playwright.
 """
 
+import base64
 import json
 import time
 from typing import Optional
@@ -210,8 +211,8 @@ class ComixAPI:
 
     @classmethod
     @retry_with_backoff()
-    def get_chapter_images(cls, manga_hid: str, chapter_id: int, chapter_number: float) -> list[str]:
-        """Fetch all image URLs for a chapter using Playwright JSON.parse interception."""
+    def get_chapter_images(cls, manga_hid: str, chapter_id: int, chapter_number: float) -> list[dict]:
+        """Fetch image data for a chapter, decrypting CDN-encrypted pages in-browser."""
         # Ensure chapter number is formatted correctly (e.g., "0" or "73" or "72.5")
         num_str = str(int(chapter_number)) if chapter_number == int(chapter_number) else str(chapter_number)
         url = f"{cls.BASE_URL}/title/{manga_hid}/{chapter_id}-chapter-{num_str}"
@@ -248,13 +249,91 @@ class ComixAPI:
                 images = []
                 for item in images_data:
                     if isinstance(item, dict):
-                        url = item.get("url")
-                        if item.get("s") == 1:
-                            url += "#scrambled"
-                        images.append(url)
+                        image_url = item.get("url")
+                        if not image_url:
+                            continue
+                        images.append({
+                            "url": image_url,
+                            "scrambled": item.get("s") == 1,
+                            "data": None
+                        })
                     elif isinstance(item, str):
-                        images.append(item)
-                logger.debug(f"Found {len(images)} image URLs")
+                        images.append({
+                            "url": item,
+                            "scrambled": False,
+                            "data": None
+                        })
+
+                scrambled_images = [
+                    {"index": index, "url": image["url"]}
+                    for index, image in enumerate(images)
+                    if image["scrambled"]
+                ]
+                if scrambled_images:
+                    logger.debug(f"Decrypting {len(scrambled_images)} encrypted images with browser ao()")
+                    page.wait_for_function("typeof globalThis.ao === 'function'", timeout=15000)
+                    decrypted_images = page.evaluate("""
+                        async (items) => {
+                            const toBase64 = (bytes) => {
+                                let binary = "";
+                                const chunkSize = 0x8000;
+                                for (let i = 0; i < bytes.length; i += chunkSize) {
+                                    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+                                }
+                                return btoa(binary);
+                            };
+
+                            const toUint8Array = (value) => {
+                                if (value instanceof Uint8Array) {
+                                    return value;
+                                }
+                                if (value instanceof ArrayBuffer) {
+                                    return new Uint8Array(value);
+                                }
+                                if (ArrayBuffer.isView(value)) {
+                                    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+                                }
+                                return Uint8Array.from(value);
+                            };
+
+                            const decryptImage = async ({index, url}) => {
+                                const absoluteUrl = new URL(url, window.location.origin).toString();
+                                const response = await fetch(absoluteUrl, {
+                                    credentials: "same-origin",
+                                    mode: "cors"
+                                });
+                                if (!response.ok) {
+                                    throw new Error(`Failed to fetch encrypted image ${absoluteUrl}: HTTP ${response.status}`);
+                                }
+
+                                const seedHeader = response.headers.get("x-enc-seed");
+                                const encLenHeader = response.headers.get("x-enc-len");
+                                if (!seedHeader || !encLenHeader) {
+                                    throw new Error(`Missing x-enc-seed or x-enc-len for ${absoluteUrl}`);
+                                }
+
+                                const seed = Number(seedHeader);
+                                const encLen = Number(encLenHeader);
+                                if (!Number.isFinite(seed) || !Number.isFinite(encLen)) {
+                                    throw new Error(`Invalid encryption headers for ${absoluteUrl}`);
+                                }
+
+                                const encrypted = new Uint8Array(await response.arrayBuffer());
+                                const decrypted = toUint8Array(globalThis.ao(encrypted, seed, encLen));
+                                return {
+                                    index,
+                                    data: toBase64(decrypted)
+                                };
+                            };
+
+                            return Promise.all(items.map(decryptImage));
+                        }
+                    """, scrambled_images)
+
+                    for decrypted in decrypted_images:
+                        images[decrypted["index"]]["data"] = base64.b64decode(decrypted["data"])
+
+                logger.debug(f"Found {len(images)} chapter images")
                 return images
             except Exception as e:
                 logger.error(f"Failed to fetch chapter images: {e}")

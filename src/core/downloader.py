@@ -8,8 +8,6 @@ import threading
 from typing import Optional, Callable
 from rich.progress import Progress, TaskID, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
-from io import BytesIO
-from PIL import Image
 import requests
 
 from .models import MangaInfo, Chapter, DownloadConfig, OutputFormat
@@ -19,7 +17,6 @@ from ..formats.pdf import create_pdf
 from ..formats.cbz import create_cbz
 from ..utils.retry import RetryableDownloader
 from ..utils.logger import get_logger
-from ..utils.session import get_session
 
 logger = get_logger(__name__)
 
@@ -35,58 +32,6 @@ def is_cancelled():
     """Check if cancellation has been signaled."""
     return _cancel_event.is_set()
 
-def get_scramble_order(seed: int, n: int = 25) -> list[int]:
-    arr = list(range(n))
-    state = seed & 0xFFFFFFFF
-    for i in range(n - 1, 0, -1):
-        state = (state * 1664525 + 1013904223) & 0xFFFFFFFF
-        j = state % (i + 1)
-        arr[i], arr[j] = arr[j], arr[i]
-    return arr
-
-def descramble_image(image_data: bytes, seed: int) -> bytes:
-    try:
-        img = Image.open(BytesIO(image_data))
-    except Exception as e:
-        logger.error(f"Failed to open image for descrambling: {e}")
-        return image_data
-        
-    width, height = img.size
-    tile_w = width // 5
-    tile_h = height // 5
-    
-    perm = get_scramble_order(seed)
-    
-    out_img = Image.new(img.mode, (width, height))
-    if img.mode == 'P':
-        out_img = Image.new('RGBA', (width, height))
-        img = img.convert('RGBA')
-        
-    out_img.paste(img, (0, 0)) # copy original as base
-    
-    for src_idx in range(25):
-        dst_idx = perm[src_idx]
-        src_c = src_idx % 5
-        src_r = src_idx // 5
-        dst_c = dst_idx % 5
-        dst_r = dst_idx // 5
-        
-        src_box = (src_c * tile_w, src_r * tile_h, (src_c + 1) * tile_w, (src_r + 1) * tile_h)
-        dst_box = (dst_c * tile_w, dst_r * tile_h)
-        
-        tile = img.crop(src_box)
-        out_img.paste(tile, dst_box)
-        
-    out_io = BytesIO()
-    fmt = img.format or "PNG"
-    if fmt == "WEBP":
-        out_img.save(out_io, format="WEBP", quality=95)
-    else:
-        if out_img.mode == 'RGBA':
-            out_img = out_img.convert('RGB')
-        out_img.save(out_io, format="JPEG", quality=90)
-    return out_io.getvalue()
-
 class ImageDownloader:
     """Downloads images with threading and retry logic."""
     
@@ -97,7 +42,16 @@ class ImageDownloader:
             base_delay=config.retry_delay
         )
     
-    def download_image(self, url: str, index: int) -> tuple[int, bytes | None, str | None]:
+    @staticmethod
+    def _normalize_image(image: str | dict) -> tuple[str, bool, bytes | None]:
+        if isinstance(image, dict):
+            data = image.get("data")
+            if data is not None and not isinstance(data, bytes):
+                data = bytes(data)
+            return image.get("url", ""), bool(image.get("scrambled")), data
+        return image, False, None
+
+    def download_image(self, image: str | dict, index: int) -> tuple[int, bytes | None, str | None]:
         """
         Download a single image with retry logic.
         
@@ -108,8 +62,15 @@ class ImageDownloader:
             if is_cancelled():
                 raise InterruptedError("Download cancelled")
                 
-            is_scrambled = url.endswith("#scrambled")
-            clean_url = url.split("#")[0]
+            url, is_scrambled, decrypted_data = self._normalize_image(image)
+            if decrypted_data is not None:
+                logger.debug(f"Using pre-decrypted image data for image {index}: {url}")
+                return decrypted_data
+
+            if is_scrambled:
+                raise ValueError(f"Scrambled image {index} was not decrypted before download")
+
+            clean_url = url
             if not clean_url.startswith("http"):
                 clean_url = "https://comix.to" + clean_url
 
@@ -127,15 +88,9 @@ class ImageDownloader:
                 "Sec-Fetch-Mode": "no-cors",
                 "Sec-Fetch-Site": "cross-site",
             }
-            if is_scrambled:
-                headers["Origin"] = "https://comix.to"
-                headers["Sec-Fetch-Mode"] = "cors"
 
             response = requests.get(clean_url, headers=headers, timeout=30, stream=True)
             response.raise_for_status()
-            
-            seed_str = response.headers.get("x-scramble-seed")
-            seed = int(seed_str) if seed_str and seed_str.isdigit() else 0
             
             content = bytearray()
             for chunk in response.iter_content(chunk_size=8192):
@@ -143,10 +98,6 @@ class ImageDownloader:
                     raise InterruptedError("Download cancelled")
                 if chunk:
                     content.extend(chunk)
-                    
-            if is_scrambled and seed != 0:
-                logger.debug(f"Descrambling image {index} with seed {seed}")
-                content = descramble_image(bytes(content), seed)
                 
             return bytes(content)
         
@@ -159,7 +110,7 @@ class ImageDownloader:
     
     def download_all_images(
         self,
-        image_urls: list[str],
+        image_items: list[str | dict],
         progress: Optional[Progress] = None,
         task_id: Optional[TaskID] = None,
         on_progress: Optional[Callable[[int, int], None]] = None
@@ -173,12 +124,12 @@ class ImageDownloader:
         results = []
         failed = []
         
-        logger.info(f"Downloading {len(image_urls)} images concurrently...")
+        logger.info(f"Downloading {len(image_items)} images concurrently...")
         
         with ThreadPoolExecutor(max_workers=self.config.max_image_workers) as executor:
             futures = {
-                executor.submit(self.download_image, url, idx): idx
-                for idx, url in enumerate(image_urls, 1)
+                executor.submit(self.download_image, image, idx): idx
+                for idx, image in enumerate(image_items, 1)
             }
             
             for future in as_completed(futures):
@@ -200,7 +151,7 @@ class ImageDownloader:
                     progress.advance(task_id)
                 
                 if on_progress:
-                    on_progress(len(results) + len(failed), len(image_urls))
+                    on_progress(len(results) + len(failed), len(image_items))
         
         if failed:
             logger.warning(f"{len(failed)} images failed to download")
@@ -234,11 +185,11 @@ class ChapterDownloader:
         base_path = Path(self.config.download_path) / manga_folder
         
         try:
-            # Fetch image URLs
+            # Fetch image metadata and any pre-decrypted encrypted pages.
             slug_or_id = self.manga.slug if self.manga.slug else self.manga.hash_id
-            image_urls = ComixAPI.get_chapter_images(slug_or_id, chapter.chapter_id, chapter.number)
+            image_items = ComixAPI.get_chapter_images(slug_or_id, chapter.chapter_id, chapter.number)
             
-            if not image_urls:
+            if not image_items:
                 return False, f"No images found for {chapter.get_display_name()}"
             
             # Create task for image downloads
@@ -246,12 +197,12 @@ class ChapterDownloader:
             if progress:
                 task_id = progress.add_task(
                     f"[cyan]  └─ {chapter.get_display_name()}",
-                    total=len(image_urls)
+                    total=len(image_items)
                 )
             
             # Download all images
             image_data = self.image_downloader.download_all_images(
-                image_urls, progress, task_id, on_progress=on_image_progress
+                image_items, progress, task_id, on_progress=on_image_progress
             )
             
             if not image_data:
@@ -282,7 +233,7 @@ class ChapterDownloader:
                     create_cbz_from_bytes(image_data, cbz_path, self.manga, chapter)
             
             if progress and task_id:
-                progress.update(task_id, completed=len(image_urls))
+                progress.update(task_id, completed=len(image_items))
             
             return True, f"Downloaded {chapter.get_display_name()} ({len(image_data)} pages)"
             
