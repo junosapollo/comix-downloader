@@ -2,8 +2,10 @@
 Comix.to API wrapper for manga information and chapter data.
 """
 
+import json
+import re
 from typing import Optional
-from ..core.models import MangaInfo, Chapter
+from playwright.sync_api import sync_playwright
 from ..utils.retry import retry_with_backoff
 from ..utils.logger import get_logger
 from ..utils.session import get_session
@@ -30,148 +32,203 @@ class ComixAPI:
         return code
     
     @classmethod
-    @retry_with_backoff()
-    def get_manga_info(cls, manga_code: str) -> Optional[MangaInfo]:
-        """Fetch manga information from API."""
-        url = f"{cls.BASE_URL}/manga/{manga_code}/"
-        logger.debug(f"Fetching manga info from: {url}")
+    def get_manga_info(cls, manga_code: str) -> Optional[any]:
+        """Fetch manga information from DOM using Playwright."""
+        from ..core.models import MangaInfo
+        url = f"https://comix.to/title/{manga_code}"
+        logger.info(f"Fetching manga info using Playwright for {manga_code}...")
         
-        response = get_session().get(url, timeout=30)
-        response.raise_for_status()
-        
-        json_data = response.json()
-        data = json_data.get("result")
-        
-        if not data:
-            logger.error(f"API returned no result for manga code: {manga_code}. Response: {json_data}")
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+                )
+                page = context.new_page()
+                
+                # Navigate to the page
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                
+                # Wait for the initial-data script tag to be present in the DOM
+                page.wait_for_selector('script#initial-data', state="attached", timeout=10000)
+                
+                # Get initial data contents
+                initial_data_str = page.locator('script#initial-data').inner_html()
+                json_data = json.loads(initial_data_str)
+                
+                browser.close()
+        except Exception as e:
+            logger.error(f"Playwright failed to fetch manga info for {manga_code}: {e}")
+            return None
+
+        # Find the manga detail query in the json_data
+        manga_detail = None
+        queries = json_data.get("queries", {})
+        for key, val in queries.items():
+            if "manga" in key and "detail" in key and manga_code in key:
+                manga_detail = val
+                break
+                
+        if not manga_detail:
+            logger.error(f"Could not find manga detail in initial-data for {manga_code}. Keys: {list(queries.keys())}")
             return None
             
+        # Get alt titles safely
+        alt_titles = manga_detail.get("altTitles", [])
+        if not isinstance(alt_titles, list):
+            alt_titles = [alt_titles] if alt_titles else []
+            
+        # Poster URL
+        poster = manga_detail.get("poster") or {}
+        poster_url = None
+        if isinstance(poster, dict):
+            poster_url = poster.get("large") or poster.get("medium")
+            
+        genres = []
+        for g in manga_detail.get("genres", []):
+            if isinstance(g, dict) and "title" in g:
+                genres.append(g["title"])
+            elif isinstance(g, str):
+                genres.append(g)
+
         return MangaInfo(
-            manga_id=data.get("manga_id"),
-            hash_id=data.get("hash_id"),
-            title=data.get("title", "Unknown"),
-            alt_titles=data.get("alt_titles", []),
-            slug=data.get("slug"),
-            rank=data.get("rank"),
-            manga_type=data.get("type"),
-            poster_url=data.get("poster", {}).get("large") or data.get("poster", {}).get("medium"),
-            original_language=data.get("original_language"),
-            status=data.get("status"),
-            final_chapter=data.get("final_chapter"),
-            latest_chapter=data.get("latest_chapter"),
-            start_date=data.get("start_date"),
-            end_date=data.get("end_date"),
-            rated_avg=data.get("rated_avg"),
-            rated_count=data.get("rated_count"),
-            follows_total=data.get("follows_total"),
-            is_nsfw=data.get("is_nsfw", False),
-            year=data.get("year"),
-            genres=data.get("term_ids", []),
-            description=data.get("synopsis", "")
+            manga_id=manga_detail.get("id"),
+            hash_id=manga_detail.get("hid"),
+            title=manga_detail.get("title", "Unknown"),
+            alt_titles=alt_titles,
+            slug=manga_detail.get("url", "").split("/")[-1] if manga_detail.get("url") else None,
+            rank=manga_detail.get("rank"),
+            manga_type=manga_detail.get("type"),
+            poster_url=poster_url,
+            original_language=manga_detail.get("originalLanguage"),
+            status=manga_detail.get("status"),
+            final_chapter=str(manga_detail.get("finalChapter") or 0),
+            latest_chapter=str(manga_detail.get("latestChapter") or 0),
+            start_date=manga_detail.get("startDate"),
+            end_date=manga_detail.get("endDate"),
+            rated_avg=manga_detail.get("ratedAvg"),
+            rated_count=manga_detail.get("ratedCount"),
+            follows_total=manga_detail.get("followsTotal"),
+            is_nsfw=manga_detail.get("contentRating") == "nsfw",
+            year=manga_detail.get("year"),
+            genres=genres,
+            description=manga_detail.get("synopsis", "")
         )
     
     @classmethod
-    def _fetch_chapter_page(cls, manga_code: str, page: int, force_flare: bool = False) -> tuple[int, list[dict]]:
-        """Fetch a single page of chapters. Returns (page_number, items)."""
-        base_path = f"/manga/{manga_code}/chapters"
-        time_val = 1
+    def get_all_chapters(cls, manga_code: str) -> list[any]:
+        """Fetch all chapters for a manga using Playwright DOM scraping."""
+        from ..core.models import Chapter
+        url = f"https://comix.to/title/{manga_code}"
+        logger.info(f"Scraping chapters using Playwright for {manga_code}...")
+        
+        scrape_js = """() => {
+            return Array.from(document.querySelectorAll('.mchap-item')).map(li => {
+                const a = li.querySelector('.mchap-row__primary');
+                const ch = li.querySelector('.mchap-row__ch');
+                const ti = li.querySelector('.mchap-row__title');
+                const gp = li.querySelector('.mchap-row__group');
+                return {
+                    href: a ? a.getAttribute('href') : null,
+                    chap_label: ch ? ch.textContent.trim() : null,
+                    title: ti ? ti.textContent.trim() : null,
+                    group: gp ? (gp.querySelector('span') ? gp.querySelector('span').textContent.trim() : gp.textContent.trim()) : null,
+                    group_official: gp ? gp.classList.contains('is-official') : false,
+                };
+            });
+        }"""
+        
+        chapters: list[Chapter] = []
+        seen_ids = set()
         
         try:
-            # Generate the required Comix hash for the request
-            request_hash = generate_comix_hash(base_path, time=time_val)
-            
-            # API uses limit, page, order, time, and _ (hash)
-            url = f"{cls.BASE_URL}{base_path}?limit=100&page={page}&order[number]=desc&time={time_val}&_={request_hash}"
-            
-            # If it's the first page and we aren't sure about the session, we can force flare
-            response = get_session().get(url, timeout=30, force_flare=force_flare)
-            response.raise_for_status()
-            
-            json_data = response.json()
-            data = json_data.get("result")
-            
-            if data is None:
-                # If result is null but status is 200, it might be a soft block or actual end
-                # If it's page 1, it's very likely a block if no chapters are found
-                if page == 1 and not force_flare:
-                    logger.warning(f"Page 1 returned null result (even with hash). Retrying with forced FlareSolverr...")
-                    return cls._fetch_chapter_page(manga_code, page, force_flare=True)
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+                )
+                page = context.new_page()
+                
+                prev_first_href = None
+                consecutive_dup_pages = 0
+                max_pages = 200
+                
+                for page_n in range(1, max_pages + 1):
+                    page_url = f"{url}?page={page_n}"
+                    page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
                     
-                logger.debug(f"API returned null result for page {page} - possibly end of list.")
-                return page, []
-                
-            return page, data.get("items", [])
-        except Exception as e:
-            # If we hit an error on page 1, try one last time with force_flare
-            if page == 1 and not force_flare:
-                logger.warning(f"Error fetching page 1: {e}. Retrying with forced FlareSolverr...")
-                return cls._fetch_chapter_page(manga_code, page, force_flare=True)
-                
-            logger.warning(f"Failed to fetch page {page}: {str(e)}")
-            return page, []
-    
-    @classmethod
-    def get_all_chapters(cls, manga_code: str) -> list[Chapter]:
-        """Fetch all chapters for a manga using parallel requests."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        
-        all_items = {}  # page -> items mapping
-        page_batch_size = 10  # Fetch 10 pages concurrently
-        current_batch_start = 1
-        found_empty = False
-        
-        logger.debug(f"Starting parallel chapter fetch for {manga_code}")
-        
-        while not found_empty:
-            # Fetch a batch of pages in parallel
-            pages_to_fetch = range(current_batch_start, current_batch_start + page_batch_size)
-            
-            with ThreadPoolExecutor(max_workers=page_batch_size) as executor:
-                futures = {
-                    executor.submit(cls._fetch_chapter_page, manga_code, page): page 
-                    for page in pages_to_fetch
-                }
-                
-                for future in as_completed(futures):
-                    page_num, items = future.result()
-                    if items:
-                        all_items[page_num] = items
+                    if prev_first_href is None:
+                        try:
+                            page.wait_for_selector(".mchap-row__primary", timeout=10000)
+                        except Exception:
+                            # If page 1 doesn't render any chapter links, there are none
+                            logger.warning(f"No chapters found on page 1 for {manga_code}")
+                            break
                     else:
-                        found_empty = True
-            
-            current_batch_start += page_batch_size
-        
-        # Build chapters list in correct order
-        chapters = []
-        for page_num in sorted(all_items.keys()):
-            for chap in all_items[page_num]:
-                if not chap:
-                    continue
+                        # Wait for React to swap the page content
+                        import json as std_json
+                        js_predicate = (
+                            "(() => { const a = document.querySelector('.mchap-row__primary'); "
+                            f"return a && a.getAttribute('href') !== {std_json.dumps(prev_first_href)}; }})"
+                        )
+                        try:
+                            page.wait_for_function(js_predicate, timeout=5000)
+                        except Exception:
+                            # If it didn't change, we likely hit the end or it failed to render new content
+                            pass
+                            
+                    rows = page.evaluate(scrape_js) or []
+                    if not rows:
+                        break
+                        
+                    prev_first_href = rows[0].get("href")
+                    page_added = 0
                     
-                group = chap.get("scanlation_group")
-                is_official = chap.get("is_official", 0)
-                
-                # Determine group name: prefer scanlation_group, then check is_official
-                if group:
-                    group_name = group.get("name")
-                elif is_official:
-                    group_name = "Official"
-                else:
-                    group_name = None
-                
-                chapters.append(Chapter(
-                    chapter_id=chap["chapter_id"],
-                    number=chap["number"],
-                    title=chap.get("name") or chap.get("title"),  # API uses 'name' field
-                    volume=chap.get("volume"),
-                    votes=chap.get("votes"),
-                    group_name=group_name,
-                    pages_count=chap.get("pages_count", 0)
-                ))
+                    for row in rows:
+                        href = row.get("href")
+                        if not href:
+                            continue
+                        
+                        # Parse `/title/{slug}/{chap_id}-chapter-{chap_num}`
+                        m = re.match(r".*/title/[^/]+/(\d+)-chapter-(.+)$", href)
+                        if not m:
+                            continue
+                        
+                        chap_id_str, chap_num_str = m.group(1), m.group(2)
+                        if chap_id_str in seen_ids:
+                            continue
+                            
+                        seen_ids.add(chap_id_str)
+                        
+                        group = row.get("group")
+                        if not group and row.get("group_official"):
+                            group = "Official"
+                            
+                        chapters.append(Chapter(
+                            chapter_id=int(chap_id_str),
+                            number=chap_num_str,
+                            title=row.get("title") or f"Chapter {chap_num_str}",
+                            volume=None,
+                            votes=0,
+                            group_name=group,
+                            pages_count=0
+                        ))
+                        page_added += 1
+                        
+                    if page_added == 0:
+                        consecutive_dup_pages += 1
+                        if consecutive_dup_pages >= 2:
+                            break
+                    else:
+                        consecutive_dup_pages = 0
+                        
+                browser.close()
+        except Exception as e:
+            logger.error(f"Playwright failed to fetch chapters for {manga_code}: {e}")
+            
         # Reverse the list so old chapters (low numbers) are at the beginning
         chapters.reverse()
-        
-        logger.info(f"Found {len(chapters)} chapters (fetched {len(all_items)} pages in parallel)")
+        logger.info(f"Found {len(chapters)} chapters using Playwright DOM scraping")
         return chapters
     
     @classmethod

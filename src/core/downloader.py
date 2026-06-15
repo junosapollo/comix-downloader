@@ -9,7 +9,6 @@ from typing import Optional, Callable
 from rich.progress import Progress, TaskID, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
 from .models import MangaInfo, Chapter, DownloadConfig, OutputFormat
-from ..api.comix import ComixAPI
 from ..formats.images import save_images, cleanup_images
 from ..formats.pdf import create_pdf
 from ..formats.cbz import create_cbz
@@ -151,6 +150,7 @@ class ChapterDownloader:
         
         try:
             # Fetch image URLs
+            from ..api.comix import ComixAPI
             image_urls = ComixAPI.get_chapter_images(chapter.chapter_id)
             
             if not image_urls:
