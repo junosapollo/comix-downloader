@@ -163,7 +163,8 @@ class ChapterDownloader:
             image_urls = ComixAPI.get_chapter_images(
                 chapter.chapter_id,
                 manga_slug=self.manga.slug or self.manga.hash_id,
-                chapter_number=chapter.number
+                chapter_number=chapter.number,
+                headless=self.config.headless
             )
             
             if not image_urls:

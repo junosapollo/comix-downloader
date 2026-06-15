@@ -123,6 +123,15 @@ Rectangle {
                     }
                 }
                 
+                // Run Browser Headless
+                SettingItem {
+                    label: "Run Browser Headless (Playwright)"
+                    ToggleSwitch {
+                        checked: SettingsBridge ? SettingsBridge.headless : true
+                        onToggled: if (SettingsBridge) SettingsBridge.setValue("headless", checked)
+                    }
+                }
+                
                 // Download Path
                 SettingItem {
                     label: "Download Path"

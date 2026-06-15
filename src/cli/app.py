@@ -163,7 +163,8 @@ def download(
     url: str = typer.Argument(None, help="Manga URL to download"),
     chapters: str = typer.Option(None, "--chapters", "-c", help="Chapter selection (e.g., '1-10', 'all')"),
     format: str = typer.Option(None, "--format", "-f", help="Output format: images, pdf, cbz"),
-    output: str = typer.Option(None, "--output", "-o", help="Output directory")
+    output: str = typer.Option(None, "--output", "-o", help="Output directory"),
+    headless: bool = typer.Option(None, "--headless/--no-headless", help="Run browser in headless mode")
 ):
     """Download manga directly from command line."""
     if url:
@@ -174,14 +175,16 @@ def download(
             config_manager.set("output_format", format)
         if output:
             config_manager.set("download_path", output)
+        if headless is not None:
+            config_manager.set("headless", headless)
         
         config = config_manager.get_download_config()
         setup_logging(enable=config.enable_logs)
         
         try:
             manga_code = ComixAPI.extract_manga_code(url)
-            manga = ComixAPI.get_manga_info(manga_code)
-            all_chapters = ComixAPI.get_all_chapters(manga_code)
+            manga = ComixAPI.get_manga_info(manga_code, headless=config.headless)
+            all_chapters = ComixAPI.get_all_chapters(manga_code, headless=config.headless)
             
             if chapters and chapters.lower() != "all":
                 from .menus import ChapterSelector

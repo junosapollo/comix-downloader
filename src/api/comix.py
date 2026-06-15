@@ -32,15 +32,19 @@ class ComixAPI:
         return code
     
     @classmethod
-    def get_manga_info(cls, manga_code: str) -> Optional[any]:
+    def get_manga_info(cls, manga_code: str, headless: Optional[bool] = None) -> Optional[any]:
         """Fetch manga information from DOM using Playwright."""
         from ..core.models import MangaInfo
+        if headless is None:
+            from ..utils.config import ConfigManager
+            headless = ConfigManager().get("headless", True)
+            
         url = f"https://comix.to/title/{manga_code}"
-        logger.info(f"Fetching manga info using Playwright for {manga_code}...")
+        logger.info(f"Fetching manga info using Playwright (headless={headless}) for {manga_code}...")
         
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=False)
+                browser = p.chromium.launch(headless=headless)
                 context = browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
                 )
@@ -116,11 +120,15 @@ class ComixAPI:
         )
     
     @classmethod
-    def get_all_chapters(cls, manga_code: str) -> list[any]:
+    def get_all_chapters(cls, manga_code: str, headless: Optional[bool] = None) -> list[any]:
         """Fetch all chapters for a manga using Playwright DOM scraping."""
         from ..core.models import Chapter
+        if headless is None:
+            from ..utils.config import ConfigManager
+            headless = ConfigManager().get("headless", True)
+            
         url = f"https://comix.to/title/{manga_code}"
-        logger.info(f"Scraping chapters using Playwright for {manga_code}...")
+        logger.info(f"Scraping chapters using Playwright (headless={headless}) for {manga_code}...")
         
         scrape_js = """() => {
             return Array.from(document.querySelectorAll('.mchap-item')).map(li => {
@@ -143,7 +151,7 @@ class ComixAPI:
         
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=False)
+                browser = p.chromium.launch(headless=headless)
                 context = browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
                 )
@@ -232,21 +240,25 @@ class ComixAPI:
         return chapters
     
     @classmethod
-    def get_chapter_images(cls, chapter_id: int, manga_slug: str = None, chapter_number: str = None) -> list[str]:
+    def get_chapter_images(cls, chapter_id: int, manga_slug: str = None, chapter_number: str = None, headless: Optional[bool] = None) -> list[str]:
         """Fetch all image URLs / data URLs for a chapter using Playwright."""
+        if headless is None:
+            from ..utils.config import ConfigManager
+            headless = ConfigManager().get("headless", True)
+            
         if not manga_slug or not chapter_number:
             manga_slug = "manga"
             chapter_number = "1"
             
         chapter_url = f"https://comix.to/title/{manga_slug}/{chapter_id}-chapter-{chapter_number}"
-        logger.info(f"Fetching chapter images via Playwright DOM for {chapter_url}...")
+        logger.info(f"Fetching chapter images via Playwright DOM (headless={headless}) for {chapter_url}...")
         
         image_urls = []
         page_count = 0
         
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=False)
+                browser = p.chromium.launch(headless=headless)
                 context = browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
                 )
