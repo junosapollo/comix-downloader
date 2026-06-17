@@ -10,6 +10,8 @@
 
 *Fast concurrent downloads • Multiple formats • Scanlator selection*
 
+🚀 **Looking for the browser extension? Check out the [Comix Browser Extension](https://github.com/Yui007/comix-extension)!**
+
 ![GUI Screenshot](GUI.PNG)
 
 </div>
