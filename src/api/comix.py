@@ -4,14 +4,23 @@ Comix.to API wrapper for manga information and chapter data.
 
 import json
 import re
+import asyncio
+import threading
 from typing import Optional
-from playwright.sync_api import sync_playwright
 from ..utils.retry import retry_with_backoff
 from ..utils.logger import get_logger
 from ..utils.session import get_session
 from ..utils.hash import generate_comix_hash
 
 logger = get_logger(__name__)
+
+# Global lock to synchronize browser creation and cookie loading/saving across threads
+_browser_lock = threading.Lock()
+
+
+def run_async(coro):
+    """Run an async coroutine synchronously."""
+    return asyncio.run(coro)
 
 
 class ComixAPI:
@@ -32,37 +41,87 @@ class ComixAPI:
         return code
     
     @classmethod
+    async def _get_manga_info_async(cls, manga_code: str, headless: bool) -> Optional[str]:
+        import nodriver as uc
+        from pathlib import Path
+        
+        url = f"https://comix.to/title/{manga_code}"
+        cookie_file = Path("cf_cookies.dat")
+        
+        browser = await uc.start(
+            headless=headless,
+            browser_args=[
+                "--start-maximized",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-ipc-flooding-protection",
+            ]
+        )
+        
+        if cookie_file.exists():
+            try:
+                await browser.cookies.load(str(cookie_file))
+                logger.info(f"Loaded cookies from {cookie_file}")
+            except Exception as e:
+                logger.warning(f"Failed loading cookies: {e}")
+        
+        try:
+            page = await browser.get(url)
+            await page.sleep(5)
+            
+            title = await page.evaluate("document.title")
+            if "moment" in title.lower():
+                logger.warning("Cloudflare challenge detected.")
+                if headless:
+                    logger.error("Cannot solve Cloudflare challenge in headless mode. Run with headless=False first.")
+                else:
+                    print("\n[!] Still on the Cloudflare challenge page.")
+                    print("[!] Solve the checkbox manually in the browser window now.")
+                    input("    Press ENTER *after* the page has fully loaded (title changes)...\n")
+                    await page
+                    title = await page.evaluate("document.title")
+            
+            script_content = None
+            for _ in range(20):
+                script_content = await page.evaluate(
+                    "document.getElementById('initial-data') ? document.getElementById('initial-data').innerHTML : null"
+                )
+                if script_content:
+                    break
+                await page.sleep(0.5)
+                
+            if "moment" not in title.lower():
+                try:
+                    await browser.cookies.save(str(cookie_file), pattern=".*")
+                    logger.info(f"Saved cookies to {cookie_file}")
+                except Exception as e:
+                    logger.warning(f"Failed saving cookies: {e}")
+                
+            return script_content
+            
+        finally:
+            browser.stop()
+            
+    @classmethod
     def get_manga_info(cls, manga_code: str, headless: Optional[bool] = None) -> Optional[any]:
-        """Fetch manga information from DOM using Playwright."""
+        """Fetch manga information from DOM using nodriver."""
         from ..core.models import MangaInfo
         if headless is None:
             from ..utils.config import ConfigManager
             headless = ConfigManager().get("headless", True)
             
-        url = f"https://comix.to/title/{manga_code}"
-        logger.info(f"Fetching manga info using Playwright (headless={headless}) for {manga_code}...")
+        logger.info(f"Fetching manga info using nodriver (headless={headless}) for {manga_code}...")
         
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=headless)
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-                )
-                page = context.new_page()
-                
-                # Navigate to the page
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                
-                # Wait for the initial-data script tag to be present in the DOM
-                page.wait_for_selector('script#initial-data', state="attached", timeout=10000)
-                
-                # Get initial data contents
-                initial_data_str = page.locator('script#initial-data').inner_html()
-                json_data = json.loads(initial_data_str)
-                
-                browser.close()
+            with _browser_lock:
+                initial_data_str = run_async(cls._get_manga_info_async(manga_code, headless))
+            if not initial_data_str:
+                return None
+            json_data = json.loads(initial_data_str)
         except Exception as e:
-            logger.error(f"Playwright failed to fetch manga info for {manga_code}: {e}")
+            logger.error(f"nodriver failed to fetch manga info for {manga_code}: {e}")
             return None
 
         # Find the manga detail query in the json_data
@@ -120,18 +179,34 @@ class ComixAPI:
         )
     
     @classmethod
-    def get_all_chapters(cls, manga_code: str, headless: Optional[bool] = None) -> list[any]:
-        """Fetch all chapters for a manga using Playwright DOM scraping."""
-        from ..core.models import Chapter
-        if headless is None:
-            from ..utils.config import ConfigManager
-            headless = ConfigManager().get("headless", True)
-            
-        url = f"https://comix.to/title/{manga_code}"
-        logger.info(f"Scraping chapters using Playwright (headless={headless}) for {manga_code}...")
+    async def _get_all_chapters_async(cls, manga_code: str, headless: bool) -> list[dict]:
+        import nodriver as uc
+        from pathlib import Path
         
-        scrape_js = """() => {
-            return Array.from(document.querySelectorAll('.mchap-item')).map(li => {
+        url = f"https://comix.to/title/{manga_code}"
+        cookie_file = Path("cf_cookies.dat")
+        
+        browser = await uc.start(
+            headless=headless,
+            browser_args=[
+                "--start-maximized",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-ipc-flooding-protection",
+            ]
+        )
+        
+        if cookie_file.exists():
+            try:
+                await browser.cookies.load(str(cookie_file))
+                logger.info(f"Loaded cookies from {cookie_file}")
+            except Exception as e:
+                logger.warning(f"Failed loading cookies: {e}")
+                
+        scrape_js = """(() => {
+            const rows = Array.from(document.querySelectorAll('.mchap-item')).map(li => {
                 const a = li.querySelector('.mchap-row__primary');
                 const ch = li.querySelector('.mchap-row__ch');
                 const ti = li.querySelector('.mchap-row__title');
@@ -144,104 +219,347 @@ class ComixAPI:
                     group_official: gp ? gp.classList.contains('is-official') : false,
                 };
             });
-        }"""
+            return JSON.stringify(rows);
+        })()"""
         
-        chapters: list[Chapter] = []
+        all_rows = []
         seen_ids = set()
         
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=headless)
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-                )
-                page = context.new_page()
-                
-                prev_first_href = None
-                consecutive_dup_pages = 0
-                max_pages = 200
-                
-                for page_n in range(1, max_pages + 1):
-                    page_url = f"{url}?page={page_n}"
-                    page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+            page = await browser.get(url)
+            await page.sleep(5)
+            
+            title = await page.evaluate("document.title")
+            if "moment" in title.lower():
+                logger.warning("Cloudflare challenge detected.")
+                if headless:
+                    logger.error("Cannot solve Cloudflare challenge in headless mode. Run with headless=False first.")
+                else:
+                    print("\n[!] Still on the Cloudflare challenge page.")
+                    print("[!] Solve the checkbox manually in the browser window now.")
+                    input("    Press ENTER *after* the page has fully loaded (title changes)...\n")
+                    await page
+                    title = await page.evaluate("document.title")
+            
+            prev_first_href = None
+            consecutive_dup_pages = 0
+            max_pages = 200
+            
+            for page_n in range(1, max_pages + 1):
+                page_url = f"{url}?page={page_n}"
+                if page_n > 1 or page_url != page.url:
+                    await page.get(page_url)
                     
-                    if prev_first_href is None:
-                        try:
-                            page.wait_for_selector(".mchap-row__primary", timeout=10000)
-                        except Exception:
-                            # If page 1 doesn't render any chapter links, there are none
-                            logger.warning(f"No chapters found on page 1 for {manga_code}")
+                rows = []
+                for _ in range(20):
+                    rows_str = await page.evaluate(scrape_js)
+                    rows = json.loads(rows_str) if rows_str else []
+                    if rows:
+                        if prev_first_href is None or rows[0].get("href") != prev_first_href:
                             break
-                    else:
-                        # Wait for React to swap the page content
-                        import json as std_json
-                        js_predicate = (
-                            "(() => { const a = document.querySelector('.mchap-row__primary'); "
-                            f"return a && a.getAttribute('href') !== {std_json.dumps(prev_first_href)}; }})"
-                        )
-                        try:
-                            page.wait_for_function(js_predicate, timeout=5000)
-                        except Exception:
-                            # If it didn't change, we likely hit the end or it failed to render new content
-                            pass
-                            
-                    rows = page.evaluate(scrape_js) or []
-                    if not rows:
+                    await page.sleep(0.2)
+                
+                if not rows:
+                    break
+                    
+                prev_first_href = rows[0].get("href")
+                page_added = 0
+                
+                for row in rows:
+                    href = row.get("href")
+                    if not href:
+                        continue
+                    
+                    # Parse `/title/{slug}/{chap_id}-chapter-{chap_num}`
+                    m = re.match(r".*/title/[^/]+/(\d+)-chapter-(.+)$", href)
+                    if not m:
+                        continue
+                    
+                    chap_id_str, chap_num_str = m.group(1), m.group(2)
+                    if chap_id_str in seen_ids:
+                        continue
+                        
+                    seen_ids.add(chap_id_str)
+                    
+                    group = row.get("group")
+                    if not group and row.get("group_official"):
+                        group = "Official"
+                        
+                    all_rows.append({
+                        "chapter_id": int(chap_id_str),
+                        "number": chap_num_str,
+                        "title": row.get("title") or f"Chapter {chap_num_str}",
+                        "group_name": group,
+                    })
+                    page_added += 1
+                    
+                if page_added == 0:
+                    consecutive_dup_pages += 1
+                    if consecutive_dup_pages >= 2:
                         break
-                        
-                    prev_first_href = rows[0].get("href")
-                    page_added = 0
-                    
-                    for row in rows:
-                        href = row.get("href")
-                        if not href:
-                            continue
-                        
-                        # Parse `/title/{slug}/{chap_id}-chapter-{chap_num}`
-                        m = re.match(r".*/title/[^/]+/(\d+)-chapter-(.+)$", href)
-                        if not m:
-                            continue
-                        
-                        chap_id_str, chap_num_str = m.group(1), m.group(2)
-                        if chap_id_str in seen_ids:
-                            continue
-                            
-                        seen_ids.add(chap_id_str)
-                        
-                        group = row.get("group")
-                        if not group and row.get("group_official"):
-                            group = "Official"
-                            
-                        chapters.append(Chapter(
-                            chapter_id=int(chap_id_str),
-                            number=chap_num_str,
-                            title=row.get("title") or f"Chapter {chap_num_str}",
-                            volume=None,
-                            votes=0,
-                            group_name=group,
-                            pages_count=0
-                        ))
-                        page_added += 1
-                        
-                    if page_added == 0:
-                        consecutive_dup_pages += 1
-                        if consecutive_dup_pages >= 2:
-                            break
-                    else:
-                        consecutive_dup_pages = 0
-                        
-                browser.close()
+                else:
+                    consecutive_dup_pages = 0
+            
+            if "moment" not in title.lower():
+                try:
+                    await browser.cookies.save(str(cookie_file), pattern=".*")
+                    logger.info(f"Saved cookies to {cookie_file}")
+                except Exception as e:
+                    logger.warning(f"Failed saving cookies: {e}")
+                
+            return all_rows
+        finally:
+            browser.stop()
+
+    @classmethod
+    def get_all_chapters(cls, manga_code: str, headless: Optional[bool] = None) -> list[any]:
+        """Fetch all chapters for a manga using nodriver DOM scraping."""
+        from ..core.models import Chapter
+        if headless is None:
+            from ..utils.config import ConfigManager
+            headless = ConfigManager().get("headless", True)
+            
+        logger.info(f"Scraping chapters using nodriver (headless={headless}) for {manga_code}...")
+        
+        chapters: list[Chapter] = []
+        try:
+            with _browser_lock:
+                rows = run_async(cls._get_all_chapters_async(manga_code, headless))
+            for row in rows:
+                chapters.append(Chapter(
+                    chapter_id=row["chapter_id"],
+                    number=row["number"],
+                    title=row["title"],
+                    volume=None,
+                    votes=0,
+                    group_name=row["group_name"],
+                    pages_count=0
+                ))
         except Exception as e:
-            logger.error(f"Playwright failed to fetch chapters for {manga_code}: {e}")
+            logger.error(f"nodriver failed to fetch chapters for {manga_code}: {e}")
             
         # Reverse the list so old chapters (low numbers) are at the beginning
         chapters.reverse()
-        logger.info(f"Found {len(chapters)} chapters using Playwright DOM scraping")
+        logger.info(f"Found {len(chapters)} chapters using nodriver DOM scraping")
         return chapters
     
     @classmethod
+    async def _get_chapter_images_async(
+        cls, chapter_id: int, manga_slug: str, chapter_number: str, headless: bool
+    ) -> tuple[list[str], int]:
+        import nodriver as uc
+        from pathlib import Path
+        
+        chapter_url = f"https://comix.to/title/{manga_slug}/{chapter_id}-chapter-{chapter_number}"
+        cookie_file = Path("cf_cookies.dat")
+        
+        browser = await uc.start(
+            headless=headless,
+            browser_args=[
+                "--start-maximized",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-ipc-flooding-protection",
+            ]
+        )
+        
+        if cookie_file.exists():
+            try:
+                await browser.cookies.load(str(cookie_file))
+                logger.info(f"Loaded cookies from {cookie_file}")
+            except Exception as e:
+                logger.warning(f"Failed loading cookies: {e}")
+                
+        image_urls = []
+        page_count = 0
+        
+        try:
+            # Setup init script to backup original toDataURL and set localStorage reader.default preload config
+            page = browser.main_tab
+            try:
+                import nodriver.cdp.page as cdp_page
+                await page.send(cdp_page.enable())
+                init_js = """
+                try {
+                    window.__origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                    const k = 'reader.default';
+                    const cur = JSON.parse(localStorage.getItem(k) || '{}');
+                    cur.preload = 'all';
+                    localStorage.setItem(k, JSON.stringify(cur));
+                } catch (e) {}
+                """
+                await page.send(cdp_page.add_script_to_evaluate_on_new_document(source=init_js))
+            except Exception as e:
+                logger.warning(f"Failed to setup page init script: {e}")
+                
+            # Now navigate directly to chapter page
+            page = await browser.get(chapter_url)
+            
+            # Check for Cloudflare challenge
+            title = await page.evaluate("document.title")
+            if "moment" in title.lower():
+                logger.warning("Cloudflare challenge detected.")
+                if headless:
+                    logger.error("Cannot solve Cloudflare challenge in headless mode. Run with headless=False first.")
+                else:
+                    print("\n[!] Still on the Cloudflare challenge page.")
+                    print("[!] Solve the checkbox manually in the browser window now.")
+                    input("    Press ENTER *after* the page has fully loaded (title changes)...\n")
+                    await page
+                    title = await page.evaluate("document.title")
+                
+            # Wait for reader page elements to load
+            for _ in range(60):
+                try:
+                    page_count = await page.evaluate("document.querySelectorAll('.rpage-page').length") or 0
+                except Exception:
+                    page_count = 0
+                if page_count > 0:
+                    break
+                await page.sleep(0.1)
+                
+            if page_count == 0:
+                logger.error(f"Chapter page had no pages in DOM: {chapter_url}")
+                return [], 0
+                
+            # Wait for first page to begin rendering
+            for _ in range(60):
+                first_ready = await page.evaluate(
+                    "document.querySelector('.rpage-page[data-page=\"1\"] canvas, .rpage-page[data-page=\"1\"] img') ? true : false"
+                )
+                if first_ready:
+                    break
+                await page.sleep(0.1)
+                
+            logger.info(f"Chapter has {page_count} pages. Extracting content...")
+            
+            for page_num in range(1, page_count + 1):
+                # Scroll page element into view to trigger render/decryption
+                try:
+                    await page.evaluate(
+                        f"(() => {{ const el = document.querySelector('.rpage-page[data-page=\"{page_num}\"]'); if (el) el.scrollIntoView({{behavior: 'instant', block: 'center'}}); }})()"
+                    )
+                except Exception:
+                    pass
+                    
+                # Wait for image element or canvas element to be ready
+                ready = None
+                for _attempt in range(80):
+                    try:
+                        ready_res = await page.evaluate(
+                            f"""(() => {{
+                                const el = document.querySelector('.rpage-page[data-page="{page_num}"]');
+                                if (!el) return null;
+                                const isLoading = el.classList.contains('is-loading');
+                                
+                                // Check canvas
+                                const c = el.querySelector('canvas');
+                                if (c && c.width > 10 && c.height > 10) {{
+                                    if (isLoading) return null; // Wait if still loading
+                                    const toDataURL = window.__origToDataURL || c.toDataURL;
+                                    const data = toDataURL.call(c, 'image/webp', 0.95);
+                                    if (data.length < 20000) {{
+                                        return JSON.stringify({{type: 'skip'}}); // Blank/Ad canvas
+                                    }}
+                                    return JSON.stringify({{type: 'canvas_data', data: data}});
+                                }}
+                                
+                                // Check image
+                                const i = el.querySelector('img');
+                                if (i && i.src) {{
+                                    if (i.complete) {{
+                                        if (i.naturalWidth > 10 && i.naturalHeight > 10) {{
+                                            return JSON.stringify({{type: 'img', src: i.src}});
+                                        }}
+                                        if (i.naturalWidth > 0 && i.naturalWidth <= 10) {{
+                                            return JSON.stringify({{type: 'skip'}}); // 1x1 placeholder
+                                        }}
+                                    }}
+                                }}
+                                return null;
+                            }})()"""
+                        )
+                        ready = json.loads(ready_res) if ready_res else None
+                    except Exception:
+                        ready = None
+                    if ready:
+                        break
+                    await page.sleep(0.2)
+                    
+                if not ready:
+                    logger.error(f"Page {page_num} timed out waiting for render.")
+                    continue
+                    
+                if ready.get('type') == 'skip':
+                    logger.debug(f"Page {page_num} is an ad/placeholder page. Skipping.")
+                    continue
+                    
+                if ready.get('type') == 'canvas_data':
+                    image_urls.append(ready.get('data'))
+                    continue
+                    
+                # Extract image data or URL from image
+                try:
+                    extracted_url = await page.evaluate(
+                        f"""(() => {{
+                            try {{
+                                const el = document.querySelector('.rpage-page[data-page="{page_num}"]');
+                                if (!el) return null;
+                                
+                                const c = el.querySelector('canvas');
+                                if (c && c.width > 0 && c.height > 0) {{
+                                    const toDataURL = window.__origToDataURL || c.toDataURL;
+                                    return toDataURL.call(c, 'image/webp', 0.95);
+                                }}
+                                
+                                const i = el.querySelector('img');
+                                if (i && i.src) {{
+                                    if (i.src.startsWith('blob:')) {{
+                                        try {{
+                                            const canvas = document.createElement('canvas');
+                                            canvas.width = i.naturalWidth || i.width;
+                                            canvas.height = i.naturalHeight || i.height;
+                                            const ctx = canvas.getContext('2d');
+                                            ctx.drawImage(i, 0, 0);
+                                            const toDataURL = window.__origToDataURL || canvas.toDataURL;
+                                            return toDataURL.call(canvas, 'image/webp', 0.95);
+                                        }} catch (e) {{
+                                            return null;
+                                        }}
+                                    }}
+                                    return i.src;
+                                }}
+                                return null;
+                            }} catch (e) {{
+                                return null;
+                            }}
+                        }})()"""
+                    )
+                except Exception as e:
+                    logger.error(f"Page {page_num} extraction failed: {e}")
+                    continue
+                    
+                if extracted_url:
+                    image_urls.append(extracted_url)
+                else:
+                    logger.error(f"Page {page_num} failed to extract valid URL or data.")
+            
+            if "moment" not in title.lower():
+                try:
+                    await browser.cookies.save(str(cookie_file), pattern=".*")
+                    logger.info(f"Saved cookies to {cookie_file}")
+                except Exception as e:
+                    logger.warning(f"Failed saving cookies: {e}")
+                
+            return image_urls, page_count
+        finally:
+            browser.stop()
+
+    @classmethod
     def get_chapter_images(cls, chapter_id: int, manga_slug: str = None, chapter_number: str = None, headless: Optional[bool] = None) -> list[str]:
-        """Fetch all image URLs / data URLs for a chapter using Playwright."""
+        """Fetch all image URLs / data URLs for a chapter using nodriver."""
         if headless is None:
             from ..utils.config import ConfigManager
             headless = ConfigManager().get("headless", True)
@@ -251,178 +569,15 @@ class ComixAPI:
             chapter_number = "1"
             
         chapter_url = f"https://comix.to/title/{manga_slug}/{chapter_id}-chapter-{chapter_number}"
-        logger.info(f"Fetching chapter images via Playwright DOM (headless={headless}) for {chapter_url}...")
+        logger.info(f"Fetching chapter images via nodriver DOM (headless={headless}) for {chapter_url}...")
         
         image_urls = []
         page_count = 0
-        
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=headless)
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-                )
-                context.add_init_script("window.__origToDataURL = HTMLCanvasElement.prototype.toDataURL;")
-                page = context.new_page()
-                
-                # Preload all the images
-                try:
-                    page.goto("https://comix.to/", wait_until="domcontentloaded", timeout=15000)
-                    page.evaluate("""() => {
-                        try {
-                            const k = 'reader.default';
-                            const cur = JSON.parse(localStorage.getItem(k) || '{}');
-                            cur.preload = 'all';
-                            localStorage.setItem(k, JSON.stringify(cur));
-                        } catch (e) {}
-                    }""")
-                except Exception as e:
-                    logger.warning(f"Failed to set preload settings: {e}")
-                
-                # Navigate to the chapter page
-                page.goto(chapter_url, wait_until="domcontentloaded", timeout=30000)
-                
-                # Wait for reader page elements to load
-                page_count = 0
-                for _ in range(60):
-                    try:
-                        page_count = page.evaluate("() => document.querySelectorAll('.rpage-page').length") or 0
-                    except Exception:
-                        page_count = 0
-                    if page_count > 0:
-                        break
-                    page.wait_for_timeout(500)
-                    
-                if page_count == 0:
-                    logger.error(f"Chapter page had no pages in DOM: {chapter_url}")
-                    browser.close()
-                    return []
-                    
-                # Wait for the first page to begin rendering to avoid cold-start timeouts
-                try:
-                    page.wait_for_selector('.rpage-page[data-page="1"] canvas, .rpage-page[data-page="1"] img', timeout=15000)
-                except Exception:
-                    pass
-                    
-                logger.info(f"Chapter has {page_count} pages. Extracting content...")
-                
-                # Iterate and capture each page
-                for page_num in range(1, page_count + 1):
-                    # Scroll page element into view to trigger render/decryption
-                    try:
-                        page.evaluate(
-                            "(n) => { const el = document.querySelector('.rpage-page[data-page=\"' + n + '\"]'); if (el) el.scrollIntoView({behavior: 'instant', block: 'center'}); }",
-                            page_num
-                        )
-                    except Exception:
-                        pass
-                        
-                    # Wait for image element or canvas element to be ready
-                    ready = None
-                    for _attempt in range(40):
-                        try:
-                            ready = page.evaluate(
-                                """(n) => {
-                                    const el = document.querySelector('.rpage-page[data-page="' + n + '"]');
-                                    if (!el) return null;
-                                    const isLoading = el.classList.contains('is-loading');
-                                    
-                                    // Check canvas
-                                    const c = el.querySelector('canvas');
-                                    if (c && c.width > 10 && c.height > 10) {
-                                        if (isLoading) return null; // Wait if still loading
-                                        const toDataURL = window.__origToDataURL || c.toDataURL;
-                                        const data = toDataURL.call(c, 'image/webp', 0.95);
-                                        if (data.length < 20000) {
-                                            return {type: 'skip'}; // Blank/Ad canvas
-                                        }
-                                        return {type: 'canvas_data', data: data};
-                                    }
-                                    
-                                    // Check image
-                                    const i = el.querySelector('img');
-                                    if (i && i.src) {
-                                        if (i.complete) {
-                                            if (i.naturalWidth > 10 && i.naturalHeight > 10) {
-                                                return {type: 'img', src: i.src};
-                                            }
-                                            if (i.naturalWidth > 0 && i.naturalWidth <= 10) {
-                                                return {type: 'skip'}; // 1x1 placeholder
-                                            }
-                                        }
-                                    }
-                                    return null;
-                                }""",
-                                page_num
-                            )
-                        except Exception:
-                            ready = None
-                        if ready:
-                            break
-                        page.wait_for_timeout(250)
-                        
-                    if not ready:
-                        logger.error(f"Page {page_num} timed out waiting for render.")
-                        continue
-                        
-                    if ready.get('type') == 'skip':
-                        logger.debug(f"Page {page_num} is an ad/placeholder page. Skipping.")
-                        continue
-                        
-                    if ready.get('type') == 'canvas_data':
-                        image_urls.append(ready.get('data'))
-                        continue
-                        
-                    # Extract the image data or URL from image (handling blobs via canvas)
-                    try:
-                        extracted_url = page.evaluate(
-                            """(n) => {
-                                try {
-                                    const el = document.querySelector('.rpage-page[data-page="' + n + '"]');
-                                    if (!el) return null;
-                                    
-                                    const c = el.querySelector('canvas');
-                                    if (c && c.width > 0 && c.height > 0) {
-                                        const toDataURL = window.__origToDataURL || c.toDataURL;
-                                        return toDataURL.call(c, 'image/webp', 0.95);
-                                    }
-                                    
-                                    const i = el.querySelector('img');
-                                    if (i && i.src) {
-                                        if (i.src.startsWith('blob:')) {
-                                            try {
-                                                const canvas = document.createElement('canvas');
-                                                canvas.width = i.naturalWidth || i.width;
-                                                canvas.height = i.naturalHeight || i.height;
-                                                const ctx = canvas.getContext('2d');
-                                                ctx.drawImage(i, 0, 0);
-                                                const toDataURL = window.__origToDataURL || canvas.toDataURL;
-                                                return toDataURL.call(canvas, 'image/webp', 0.95);
-                                            } catch (e) {
-                                                return null;
-                                            }
-                                        }
-                                        return i.src;
-                                    }
-                                    return null;
-                                } catch (e) {
-                                    return null;
-                                }
-                            }""",
-                            page_num
-                        )
-                    except Exception as e:
-                        logger.error(f"Page {page_num} extraction failed: {e}")
-                        continue
-                        
-                    if extracted_url:
-                        image_urls.append(extracted_url)
-                    else:
-                        logger.error(f"Page {page_num} failed to extract valid URL or data.")
-                        
-                browser.close()
+            with _browser_lock:
+                image_urls, page_count = run_async(cls._get_chapter_images_async(chapter_id, manga_slug, chapter_number, headless))
         except Exception as e:
-            logger.error(f"Playwright failed to fetch images for chapter {chapter_id}: {e}")
+            logger.error(f"nodriver failed to fetch images for chapter {chapter_id}: {e}")
             
         logger.info(f"Retrieved {len(image_urls)} / {page_count} page images.")
         return image_urls

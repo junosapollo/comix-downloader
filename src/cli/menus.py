@@ -288,7 +288,7 @@ class SettingsMenu:
                 f"  [cyan bold]5[/] │ Max Chapter Workers: [white]{config.max_chapter_workers}[/]",
                 f"  [cyan bold]6[/] │ Max Image Workers: [white]{config.max_image_workers}[/]",
                 f"  [cyan bold]7[/] │ Chapters Display Limit: [white]{display_text}[/]",
-                f"  [cyan bold]8[/] │ Run Browser Headless (Playwright): [white]{'✅ Yes' if config.headless else '❌ No (Show Browser Window)'}[/]",
+                f"  [cyan bold]8[/] │ Run Browser Headless (nodriver): [white]{'✅ Yes' if config.headless else '❌ No (Show Browser Window)'}[/]",
                 f"  [cyan bold]9[/] │ Reset to Defaults",
                 f"  [cyan bold]0[/] │ Back to Main Menu",
             ]

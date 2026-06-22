@@ -125,7 +125,7 @@ Rectangle {
                 
                 // Run Browser Headless
                 SettingItem {
-                    label: "Run Browser Headless (Playwright)"
+                    label: "Run Browser Headless (nodriver)"
                     ToggleSwitch {
                         checked: SettingsBridge ? SettingsBridge.headless : true
                         onToggled: if (SettingsBridge) SettingsBridge.setValue("headless", checked)

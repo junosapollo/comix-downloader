@@ -48,8 +48,7 @@ cd comix-downloader
 # Install dependencies
 pip install -r requirements.txt
 
-# Install Playwright browser dependencies
-playwright install chromium
+# Install Chrome browser (nodriver handles driver download automatically)
 ```
 
 ---
@@ -126,7 +125,7 @@ comix-downloader/
 - **[Rich](https://rich.readthedocs.io/)** - Beautiful terminal output
 
 **Shared:**
-- **[Playwright](https://playwright.dev/python/)** - Browser automation and canvas image extraction
+- **[nodriver](https://github.com/sebdelsol/nodriver)** - Browser automation and canvas image extraction
 - **[Requests](https://requests.readthedocs.io/)** - HTTP library
 - **[Pillow](https://pillow.readthedocs.io/)** - Image processing
 - **[ReportLab](https://www.reportlab.com/)** - PDF generation
