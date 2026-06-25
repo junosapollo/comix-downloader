@@ -109,7 +109,9 @@ comix-downloader/
 │   ├── api/comix.py        # API wrapper
 │   ├── core/               # Models & downloader
 │   ├── formats/            # PDF, CBZ, Images
-│   └── cli/                # CLI application
+│   ├── cli/                # CLI application
+│   └── utils/              # Config, logging, session, compatibility helpers
+├── tests/                  # Unit tests
 └── config.json             # User settings
 ```
 
@@ -129,6 +131,10 @@ comix-downloader/
 - **[Requests](https://requests.readthedocs.io/)** - HTTP library
 - **[Pillow](https://pillow.readthedocs.io/)** - Image processing
 - **[ReportLab](https://www.reportlab.com/)** - PDF generation
+
+> Note: The app includes a small compatibility shim for a `nodriver 0.50.3`
+> source-encoding issue on Python 3.14. No manual edits inside `site-packages`
+> are required.
 
 ---
 
