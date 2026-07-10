@@ -7,6 +7,13 @@ from typing import Optional
 from enum import Enum
 
 
+def _safe_path_component(value: str, max_length: int, fallback: str) -> str:
+    """Return a filesystem-safe path component."""
+    safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in value)
+    safe = safe.strip()[:max_length].rstrip(" .")
+    return safe or fallback
+
+
 class OutputFormat(str, Enum):
     """Supported output formats."""
     IMAGES = "images"
@@ -41,8 +48,7 @@ class MangaInfo:
     
     def get_safe_title(self) -> str:
         """Get filesystem-safe title."""
-        safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in self.title)
-        return safe.strip()[:100]
+        return _safe_path_component(self.title, 100, "Unknown")
 
 
 @dataclass
@@ -67,9 +73,10 @@ class Chapter:
         """Get filesystem-safe folder name."""
         name = f"Chapter_{self.number}"
         if self.title:
-            safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in self.title)
-            name += f"_{safe_title[:50]}"
-        return name
+            safe_title = _safe_path_component(self.title, 50, "")
+            if safe_title:
+                name += f"_{safe_title}"
+        return name.rstrip(" .")
 
 
 @dataclass
