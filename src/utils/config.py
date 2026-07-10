@@ -66,8 +66,15 @@ class ConfigManager:
     
     def get_download_config(self) -> DownloadConfig:
         """Get DownloadConfig from current settings."""
+        try:
+            output_format = OutputFormat(self.get("output_format", "images"))
+        except ValueError:
+            bad_format = self.get("output_format", "images")
+            logger.warning(f"Invalid output_format {bad_format!r}; using images")
+            output_format = OutputFormat.IMAGES
+
         return DownloadConfig(
-            output_format=OutputFormat(self.get("output_format", "images")),
+            output_format=output_format,
             keep_images=self.get("keep_images", False),
             enable_logs=self.get("enable_logs", False),
             max_chapter_workers=self.get("max_chapter_workers", 3),

@@ -3,10 +3,38 @@ Image saving utilities.
 """
 
 from pathlib import Path
-from typing import Optional
+from io import BytesIO
+from PIL import Image
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def validate_image_bytes(data: bytes) -> None:
+    """Raise ValueError if bytes are not a readable image."""
+    try:
+        with Image.open(BytesIO(data)) as img:
+            img.verify()
+    except Exception as e:
+        raise ValueError(f"Invalid image data: {e}") from e
+
+
+def get_image_extension(data: bytes) -> str:
+    """Determine image extension from validated image bytes."""
+    validate_image_bytes(data)
+
+    with Image.open(BytesIO(data)) as img:
+        image_format = (img.format or "").upper()
+
+    if image_format == "PNG":
+        return ".png"
+    if image_format in ("JPEG", "JPG"):
+        return ".jpg"
+    if image_format == "GIF":
+        return ".gif"
+    if image_format == "WEBP":
+        return ".webp"
+    return ".jpg"
 
 
 def save_images(
@@ -32,7 +60,7 @@ def save_images(
     
     for idx, data in sorted(image_data, key=lambda x: x[0]):
         # Determine file extension from data
-        ext = _get_image_extension(data)
+        ext = get_image_extension(data)
         filename = f"{idx:03d}{ext}"
         filepath = chapter_dir / filename
         
@@ -48,16 +76,7 @@ def save_images(
 
 def _get_image_extension(data: bytes) -> str:
     """Determine image extension from file header."""
-    if data[:8] == b'\x89PNG\r\n\x1a\n':
-        return ".png"
-    elif data[:2] == b'\xff\xd8':
-        return ".jpg"
-    elif data[:6] in (b'GIF87a', b'GIF89a'):
-        return ".gif"
-    elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
-        return ".webp"
-    else:
-        return ".jpg"  # Default to jpg
+    return get_image_extension(data)
 
 
 def cleanup_images(image_paths: list[Path]) -> None:

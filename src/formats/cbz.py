@@ -4,14 +4,57 @@ CBZ (Comic Book ZIP) creation with ComicInfo.xml metadata.
 
 import zipfile
 from pathlib import Path
-from io import BytesIO
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 from typing import Optional
 from ..core.models import MangaInfo, Chapter
+from .images import get_image_extension, validate_image_bytes
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _part_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.name}.part")
+
+
+def _write_cbz(
+    entries: list[tuple[str, bytes | Path]],
+    output_path: Path,
+    manga: Optional[MangaInfo],
+    chapter: Optional[Chapter],
+) -> Path:
+    if not entries:
+        raise ValueError("No valid images provided for CBZ creation")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _part_path(output_path)
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    try:
+        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as cbz:
+            for filename, source in entries:
+                if isinstance(source, Path):
+                    cbz.write(source, filename)
+                else:
+                    cbz.writestr(filename, source)
+                logger.debug(f"Added to CBZ: {filename}")
+
+            if manga and chapter:
+                comic_info = create_comic_info_xml(manga, chapter, len(entries))
+                cbz.writestr("ComicInfo.xml", comic_info)
+                logger.debug("Added ComicInfo.xml")
+
+        tmp_path.replace(output_path)
+        logger.info(f"Created CBZ: {output_path}")
+        return output_path
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def create_comic_info_xml(
@@ -123,26 +166,13 @@ def create_cbz(
         Path to created CBZ
     """
     output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    if not image_paths:
-        logger.warning("No images provided for CBZ creation")
-        return output_path
-    
-    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as cbz:
-        # Add images
-        for img_path in sorted(image_paths):
-            cbz.write(img_path, img_path.name)
-            logger.debug(f"Added to CBZ: {img_path.name}")
-        
-        # Add ComicInfo.xml if manga info available
-        if manga and chapter:
-            comic_info = create_comic_info_xml(manga, chapter, len(image_paths))
-            cbz.writestr("ComicInfo.xml", comic_info)
-            logger.debug("Added ComicInfo.xml")
-    
-    logger.info(f"Created CBZ: {output_path}")
-    return output_path
+    entries = []
+    for img_path in sorted(image_paths):
+        data = img_path.read_bytes()
+        validate_image_bytes(data)
+        entries.append((img_path.name, img_path))
+
+    return _write_cbz(entries, output_path, manga, chapter)
 
 
 def create_cbz_from_bytes(
@@ -164,37 +194,14 @@ def create_cbz_from_bytes(
         Path to created CBZ
     """
     output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    if not image_data:
-        logger.warning("No images provided for CBZ creation")
-        return output_path
-    
-    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as cbz:
-        # Add images
-        for idx, data in sorted(image_data, key=lambda x: x[0]):
-            ext = _get_extension_from_bytes(data)
-            filename = f"{idx:03d}{ext}"
-            cbz.writestr(filename, data)
-        
-        # Add ComicInfo.xml if manga info available
-        if manga and chapter:
-            comic_info = create_comic_info_xml(manga, chapter, len(image_data))
-            cbz.writestr("ComicInfo.xml", comic_info)
-    
-    logger.info(f"Created CBZ: {output_path}")
-    return output_path
+    entries = []
+    for idx, data in sorted(image_data, key=lambda x: x[0]):
+        ext = _get_extension_from_bytes(data)
+        entries.append((f"{idx:03d}{ext}", data))
+
+    return _write_cbz(entries, output_path, manga, chapter)
 
 
 def _get_extension_from_bytes(data: bytes) -> str:
     """Determine image extension from file header."""
-    if data[:8] == b'\x89PNG\r\n\x1a\n':
-        return ".png"
-    elif data[:2] == b'\xff\xd8':
-        return ".jpg"
-    elif data[:6] in (b'GIF87a', b'GIF89a'):
-        return ".gif"
-    elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
-        return ".webp"
-    else:
-        return ".jpg"
+    return get_image_extension(data)

@@ -33,7 +33,6 @@ class DownloadWorker(QThread):
     def _download_single_chapter(self, chapter_dict, manga, total):
         """Download a single chapter. Called from thread pool."""
         try:
-            from src.api.comix import ComixAPI
             from src.core.downloader import ChapterDownloader
             from src.core.models import Chapter
             
@@ -42,6 +41,8 @@ class DownloadWorker(QThread):
                 chapter_id=chapter_dict["chapter_id"],
                 number=chapter_dict["number"],
                 title=chapter_dict.get("title"),
+                volume=chapter_dict.get("volume"),
+                votes=chapter_dict.get("votes"),
                 group_name=chapter_dict.get("group_name"),
                 pages_count=chapter_dict.get("pages_count", 0)
             )
@@ -90,6 +91,9 @@ class DownloadWorker(QThread):
     def run(self):
         try:
             from src.core.models import MangaInfo
+            from src.core.downloader import reset_downloads
+
+            reset_downloads()
             
             # Convert dict back to MangaInfo
             manga = MangaInfo(
@@ -97,14 +101,22 @@ class DownloadWorker(QThread):
                 hash_id=self.manga_dict.get("hash_id"),
                 title=self.manga_dict.get("title", "Unknown"),
                 alt_titles=self.manga_dict.get("alt_titles", []),
+                rank=self.manga_dict.get("rank"),
                 manga_type=self.manga_dict.get("manga_type"),
                 status=self.manga_dict.get("status"),
                 poster_url=self.manga_dict.get("poster_url"),
+                original_language=self.manga_dict.get("original_language"),
+                final_chapter=self.manga_dict.get("final_chapter"),
+                latest_chapter=self.manga_dict.get("latest_chapter"),
+                start_date=self.manga_dict.get("start_date"),
+                end_date=self.manga_dict.get("end_date"),
                 year=self.manga_dict.get("year"),
                 rated_avg=self.manga_dict.get("rated_avg"),
+                rated_count=self.manga_dict.get("rated_count"),
                 follows_total=self.manga_dict.get("follows_total"),
                 is_nsfw=self.manga_dict.get("is_nsfw", False),
                 slug=self.manga_dict.get("slug"),
+                genres=self.manga_dict.get("genres", []),
                 description=self.manga_dict.get("description", "")
             )
             
@@ -174,7 +186,11 @@ class DownloadBridge(QObject):
         
         # Get config and update format
         config = self._config_manager.get_download_config()
-        config.output_format = OutputFormat(format_type)
+        try:
+            config.output_format = OutputFormat(format_type)
+        except ValueError:
+            self.errorOccurred.emit("Invalid format. Choose images, pdf, or cbz")
+            return
         
         # Filter by scanlator preference if specified
         if scanlator and scanlator != "Any":
@@ -216,5 +232,5 @@ class DownloadBridge(QObject):
     def cancelDownload(self):
         """Cancel the current download."""
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait()
+            from src.core.downloader import cancel_downloads
+            cancel_downloads()

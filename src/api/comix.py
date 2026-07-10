@@ -6,6 +6,7 @@ import json
 import re
 import asyncio
 import threading
+from dataclasses import dataclass, field
 from typing import Optional
 from ..utils.retry import retry_with_backoff
 from ..utils.logger import get_logger
@@ -17,6 +18,22 @@ logger = get_logger(__name__)
 
 # Global lock to synchronize browser creation and cookie loading/saving across threads
 _browser_lock = threading.Lock()
+
+
+@dataclass
+class ChapterImageFetchReport:
+    """Images extracted from a chapter reader page, plus extraction diagnostics."""
+
+    image_urls: list[str]
+    page_count: int = 0
+    skipped_pages: list[int] = field(default_factory=list)
+    failed_pages: list[int] = field(default_factory=list)
+
+    @property
+    def expected_image_count(self) -> int:
+        if self.page_count <= 0:
+            return len(self.image_urls)
+        return max(0, self.page_count - len(self.skipped_pages))
 
 
 def run_async(coro):
@@ -561,7 +578,7 @@ class ComixAPI:
     @classmethod
     async def _get_chapter_images_async(
         cls, chapter_id: int, manga_slug: str, chapter_number: str, headless: bool
-    ) -> tuple[list[str], int]:
+    ) -> ChapterImageFetchReport:
         uc = load_nodriver()
         from pathlib import Path
         
@@ -593,6 +610,8 @@ class ComixAPI:
                 
         image_urls = []
         page_count = 0
+        skipped_pages = []
+        failed_pages = []
         
         try:
             # Setup init script to backup original toDataURL and set localStorage reader.default preload config
@@ -635,7 +654,7 @@ class ComixAPI:
                 logger.warning("Cloudflare challenge detected.")
                 if headless:
                     logger.error("Cannot solve Cloudflare challenge in headless mode. Run with headless=False first.")
-                    return [], 0
+                    return ChapterImageFetchReport([], 0, [], [])
                 else:
                     print("\n[!] Still on the Cloudflare challenge page.")
                     print("[!] Solve the checkbox manually in the browser window now.")
@@ -653,7 +672,7 @@ class ComixAPI:
                 
             if page_count == 0:
                 logger.error(f"Chapter page had no pages in DOM: {chapter_url}")
-                return [], 0
+                return ChapterImageFetchReport([], 0, [], [])
                 
             # Wait for first page to begin rendering
             for _ in range(150):
@@ -724,10 +743,12 @@ class ComixAPI:
                     
                 if not ready:
                     logger.error(f"Page {page_num} timed out waiting for render.")
+                    failed_pages.append(page_num)
                     continue
                     
                 if ready.get('type') == 'skip':
                     logger.debug(f"Page {page_num} is an ad/placeholder page. Skipping.")
+                    skipped_pages.append(page_num)
                     continue
                     
                 if ready.get('type') == 'canvas_data':
@@ -773,12 +794,14 @@ class ComixAPI:
                     )
                 except Exception as e:
                     logger.error(f"Page {page_num} extraction failed: {e}")
+                    failed_pages.append(page_num)
                     continue
                     
                 if extracted_url:
                     image_urls.append(extracted_url)
                 else:
                     logger.error(f"Page {page_num} failed to extract valid URL or data.")
+                    failed_pages.append(page_num)
             
             if "moment" not in title.lower():
                 _browser_lock.acquire()
@@ -790,13 +813,13 @@ class ComixAPI:
                 finally:
                     _browser_lock.release()
                 
-            return image_urls, page_count
+            return ChapterImageFetchReport(image_urls, page_count, skipped_pages, failed_pages)
         finally:
             browser.stop()
 
     @classmethod
-    def get_chapter_images(cls, chapter_id: int, manga_slug: str = None, chapter_number: str = None, headless: Optional[bool] = None) -> list[str]:
-        """Fetch all image URLs / data URLs for a chapter using nodriver."""
+    def get_chapter_image_report(cls, chapter_id: int, manga_slug: str = None, chapter_number: str = None, headless: Optional[bool] = None) -> ChapterImageFetchReport:
+        """Fetch image URLs / data URLs for a chapter with extraction diagnostics."""
         if headless is None:
             from ..utils.config import ConfigManager
             headless = ConfigManager().get("headless", True)
@@ -808,12 +831,21 @@ class ComixAPI:
         chapter_url = f"https://comix.to/title/{manga_slug}/{chapter_id}-chapter-{chapter_number}"
         logger.info(f"Fetching chapter images via nodriver DOM (headless={headless}) for {chapter_url}...")
         
-        image_urls = []
-        page_count = 0
+        report = ChapterImageFetchReport([])
         try:
-            image_urls, page_count = run_async(cls._get_chapter_images_async(chapter_id, manga_slug, chapter_number, headless))
+            report = run_async(cls._get_chapter_images_async(chapter_id, manga_slug, chapter_number, headless))
         except Exception as e:
             logger.error(f"nodriver failed to fetch images for chapter {chapter_id}: {e}")
             
-        logger.info(f"Retrieved {len(image_urls)} / {page_count} page images.")
-        return image_urls
+        logger.info(f"Retrieved {len(report.image_urls)} / {report.page_count} page images.")
+        return report
+
+    @classmethod
+    def get_chapter_images(cls, chapter_id: int, manga_slug: str = None, chapter_number: str = None, headless: Optional[bool] = None) -> list[str]:
+        """Fetch all image URLs / data URLs for a chapter using nodriver."""
+        return cls.get_chapter_image_report(
+            chapter_id,
+            manga_slug=manga_slug,
+            chapter_number=chapter_number,
+            headless=headless,
+        ).image_urls
