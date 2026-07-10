@@ -1,5 +1,5 @@
 {
-  "output_format": "pdf",
+  "output_format": "images",
   "keep_images": false,
   "enable_logs": false,
   "max_chapter_workers": 3,
