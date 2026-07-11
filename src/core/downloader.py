@@ -4,12 +4,13 @@ Main downloader with threading support for concurrent downloads.
 
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import threading
 from typing import Optional, Callable
 from rich.progress import Progress, TaskID, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
 from .models import MangaInfo, Chapter, DownloadConfig, OutputFormat
-from ..formats.images import save_images, cleanup_images
+from ..formats.images import save_images, validate_image_bytes
 from ..formats.pdf import create_pdf
 from ..formats.cbz import create_cbz
 from ..utils.retry import RetryableDownloader
@@ -26,9 +27,26 @@ def cancel_downloads():
     _cancel_event.set()
     logger.warning("Cancellation signal received. Stopping downloads...")
 
+def reset_downloads():
+    """Clear any previous cancellation signal before a new download run."""
+    _cancel_event.clear()
+
 def is_cancelled():
     """Check if cancellation has been signaled."""
     return _cancel_event.is_set()
+
+
+@dataclass
+class ImageDownloadReport:
+    """Result of a multi-image download attempt."""
+
+    images: list[tuple[int, bytes]]
+    failed: list[tuple[int, str]]
+    total: int
+
+    @property
+    def is_complete(self) -> bool:
+        return len(self.images) == self.total and not self.failed
 
 
 class ImageDownloader:
@@ -52,10 +70,11 @@ class ImageDownloader:
             try:
                 import base64
                 header, b64_data = url.split(",", 1)
-                img_bytes = base64.b64decode(b64_data)
+                img_bytes = base64.b64decode(b64_data, validate=True)
+                validate_image_bytes(img_bytes)
                 return index, img_bytes, None
             except Exception as e:
-                return index, None, f"Failed to decode data URL: {e}"
+                return index, None, f"Failed to decode or validate data URL: {e}"
 
         def _download():
             if is_cancelled():
@@ -72,7 +91,9 @@ class ImageDownloader:
                     raise InterruptedError("Download cancelled")
                 if chunk:
                     content.extend(chunk)
-            return bytes(content)
+            data = bytes(content)
+            validate_image_bytes(data)
+            return data
         
         success, data, error = self.retrier.download_with_retry(
             _download,
@@ -81,18 +102,18 @@ class ImageDownloader:
         
         return index, data if success else None, error
     
-    def download_all_images(
+    def download_all_images_report(
         self,
         image_urls: list[str],
         progress: Optional[Progress] = None,
         task_id: Optional[TaskID] = None,
         on_progress: Optional[Callable[[int, int], None]] = None
-    ) -> list[tuple[int, bytes]]:
+    ) -> ImageDownloadReport:
         """
         Download all images concurrently.
         
         Returns:
-            List of (index, image_bytes) tuples for successful downloads
+            Report containing successful and failed image downloads
         """
         results = []
         failed = []
@@ -129,7 +150,23 @@ class ImageDownloader:
         if failed:
             logger.warning(f"{len(failed)} images failed to download")
         
-        return sorted(results, key=lambda x: x[0])
+        return ImageDownloadReport(
+            images=sorted(results, key=lambda x: x[0]),
+            failed=sorted(failed, key=lambda x: x[0]),
+            total=len(image_urls),
+        )
+
+    def download_all_images(
+        self,
+        image_urls: list[str],
+        progress: Optional[Progress] = None,
+        task_id: Optional[TaskID] = None,
+        on_progress: Optional[Callable[[int, int], None]] = None
+    ) -> list[tuple[int, bytes]]:
+        """Download all images and return only successful image bytes."""
+        return self.download_all_images_report(
+            image_urls, progress, task_id, on_progress
+        ).images
 
 
 class ChapterDownloader:
@@ -158,17 +195,40 @@ class ChapterDownloader:
         base_path = Path(self.config.download_path) / manga_folder
         
         try:
+            if is_cancelled():
+                return False, "Download cancelled"
+
             # Fetch image URLs
             from ..api.comix import ComixAPI
-            image_urls = ComixAPI.get_chapter_images(
+            image_report = ComixAPI.get_chapter_image_report(
                 chapter.chapter_id,
                 manga_slug=self.manga.slug or self.manga.hash_id,
                 chapter_number=chapter.number,
                 headless=self.config.headless
-            )
+            ) if hasattr(ComixAPI, "get_chapter_image_report") else None
+
+            if image_report:
+                image_urls = image_report.image_urls
+                expected_pages = image_report.expected_image_count
+                failed_pages = image_report.failed_pages
+            else:
+                image_urls = ComixAPI.get_chapter_images(
+                    chapter.chapter_id,
+                    manga_slug=self.manga.slug or self.manga.hash_id,
+                    chapter_number=chapter.number,
+                    headless=self.config.headless
+                )
+                expected_pages = len(image_urls)
+                failed_pages = []
             
             if not image_urls:
                 return False, f"No images found for {chapter.get_display_name()}"
+
+            if failed_pages or expected_pages != len(image_urls):
+                return False, (
+                    f"Incomplete image extraction for {chapter.get_display_name()} "
+                    f"({len(image_urls)}/{expected_pages} pages ready)"
+                )
             
             # Create task for image downloads
             task_id = None
@@ -179,12 +239,24 @@ class ChapterDownloader:
                 )
             
             # Download all images
-            image_data = self.image_downloader.download_all_images(
+            download_report = self.image_downloader.download_all_images_report(
                 image_urls, progress, task_id, on_progress=on_image_progress
             )
+            image_data = download_report.images
+
+            if is_cancelled():
+                return False, "Download cancelled"
             
             if not image_data:
                 return False, f"Failed to download any images for {chapter.get_display_name()}"
+
+            if not download_report.is_complete:
+                if self.config.output_format == OutputFormat.IMAGES:
+                    save_images(image_data, base_path, chapter_folder)
+                return False, (
+                    f"Incomplete download for {chapter.get_display_name()} "
+                    f"({len(image_data)}/{download_report.total} pages)"
+                )
             
             # Save in configured format
             if self.config.output_format == OutputFormat.IMAGES:
@@ -241,6 +313,7 @@ class MangaDownloader:
         """
         successful = 0
         failed = 0
+        reset_downloads()
         
         chapter_downloader = ChapterDownloader(self.config, manga)
         

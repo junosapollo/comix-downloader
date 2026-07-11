@@ -3,6 +3,7 @@ Main Typer CLI application.
 """
 
 import typer
+from dataclasses import replace
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 from pathlib import Path
@@ -169,16 +170,18 @@ def download(
     """Download manga directly from command line."""
     if url:
         # Direct download mode
+        if format and format not in {item.value for item in OutputFormat}:
+            Display.error("Invalid format. Choose one of: images, pdf, cbz")
+            raise typer.Exit(1)
+
         config_manager = ConfigManager()
-        
-        if format:
-            config_manager.set("output_format", format)
-        if output:
-            config_manager.set("download_path", output)
-        if headless is not None:
-            config_manager.set("headless", headless)
-        
         config = config_manager.get_download_config()
+        config = replace(
+            config,
+            output_format=OutputFormat(format) if format else config.output_format,
+            download_path=output if output else config.download_path,
+            headless=headless if headless is not None else config.headless,
+        )
         setup_logging(enable=config.enable_logs)
         
         try:

@@ -4,14 +4,70 @@ PDF creation from downloaded images.
 
 from pathlib import Path
 from io import BytesIO
-from typing import Optional
 from PIL import Image
-from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _part_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.name}.part")
+
+
+def _load_image_for_pdf(source) -> Image.Image:
+    img = Image.open(source)
+    img.load()
+
+    if img.mode in ('RGBA', 'LA', 'P'):
+        if img.mode == 'P':
+            img = img.convert('RGBA')
+        background = Image.new('RGB', img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+        return background
+
+    if img.mode != 'RGB':
+        return img.convert('RGB')
+
+    return img
+
+
+def _write_pdf(images: list[tuple[int, Image.Image]], output_path: Path, title: str) -> Path:
+    if not images:
+        raise ValueError("No valid images provided for PDF creation")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _part_path(output_path)
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    try:
+        c = canvas.Canvas(str(tmp_path))
+        c.setTitle(title)
+
+        for idx, img in images:
+            img_width, img_height = img.size
+            c.setPageSize((img_width, img_height))
+
+            img_buffer = BytesIO()
+            img.save(img_buffer, format='JPEG', quality=95)
+            img_buffer.seek(0)
+
+            c.drawImage(ImageReader(img_buffer), 0, 0, img_width, img_height)
+            c.showPage()
+            logger.debug(f"Added page {idx} to PDF")
+
+        c.save()
+        tmp_path.replace(output_path)
+        logger.info(f"Created PDF: {output_path}")
+        return output_path
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def create_pdf(
@@ -31,55 +87,11 @@ def create_pdf(
         Path to created PDF
     """
     output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    if not image_paths:
-        logger.warning("No images provided for PDF creation")
-        return output_path
-    
-    # Get dimensions from first image for reference
-    first_img = Image.open(image_paths[0])
-    
-    c = canvas.Canvas(str(output_path))
-    c.setTitle(title)
-    
-    for img_path in sorted(image_paths):
-        try:
-            img = Image.open(img_path)
-            
-            # Convert to RGB if necessary (for PNG with transparency)
-            if img.mode in ('RGBA', 'LA', 'P'):
-                background = Image.new('RGB', img.size, (255, 255, 255))
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                img = background
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # Get image dimensions
-            img_width, img_height = img.size
-            
-            # Set PDF page size to match image
-            c.setPageSize((img_width, img_height))
-            
-            # Draw image on page
-            img_buffer = BytesIO()
-            img.save(img_buffer, format='JPEG', quality=95)
-            img_buffer.seek(0)
-            
-            c.drawImage(ImageReader(img_buffer), 0, 0, img_width, img_height)
-            c.showPage()
-            
-            logger.debug(f"Added to PDF: {img_path.name}")
-            
-        except Exception as e:
-            logger.error(f"Failed to add image {img_path} to PDF: {e}")
-            continue
-    
-    c.save()
-    logger.info(f"Created PDF: {output_path}")
-    return output_path
+    images = [
+        (idx, _load_image_for_pdf(img_path))
+        for idx, img_path in enumerate(sorted(image_paths), 1)
+    ]
+    return _write_pdf(images, output_path, title)
 
 
 def create_pdf_from_bytes(
@@ -99,43 +111,8 @@ def create_pdf_from_bytes(
         Path to created PDF
     """
     output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    if not image_data:
-        logger.warning("No images provided for PDF creation")
-        return output_path
-    
-    c = canvas.Canvas(str(output_path))
-    c.setTitle(title)
-    
-    for idx, data in sorted(image_data, key=lambda x: x[0]):
-        try:
-            img = Image.open(BytesIO(data))
-            
-            # Convert to RGB if necessary
-            if img.mode in ('RGBA', 'LA', 'P'):
-                background = Image.new('RGB', img.size, (255, 255, 255))
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                img = background
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            img_width, img_height = img.size
-            c.setPageSize((img_width, img_height))
-            
-            img_buffer = BytesIO()
-            img.save(img_buffer, format='JPEG', quality=95)
-            img_buffer.seek(0)
-            
-            c.drawImage(ImageReader(img_buffer), 0, 0, img_width, img_height)
-            c.showPage()
-            
-        except Exception as e:
-            logger.error(f"Failed to add image {idx} to PDF: {e}")
-            continue
-    
-    c.save()
-    logger.info(f"Created PDF: {output_path}")
-    return output_path
+    images = [
+        (idx, _load_image_for_pdf(BytesIO(data)))
+        for idx, data in sorted(image_data, key=lambda x: x[0])
+    ]
+    return _write_pdf(images, output_path, title)
