@@ -12,7 +12,8 @@ from ..utils.retry import retry_with_backoff
 from ..utils.logger import get_logger
 from ..utils.session import get_session
 from ..utils.hash import generate_comix_hash
-from ..utils.nodriver_compat import load_cdp_page, load_nodriver
+from ..utils.nodriver_browser import start_browser
+from ..utils.nodriver_compat import load_cdp_page
 
 logger = get_logger(__name__)
 
@@ -62,7 +63,6 @@ class ComixAPI:
     
     @classmethod
     async def _get_manga_info_async(cls, manga_code: str, headless: bool) -> Optional[str]:
-        uc = load_nodriver()
         from pathlib import Path
         
         url = f"https://comix.to/title/{manga_code}"
@@ -70,17 +70,7 @@ class ComixAPI:
         
         _browser_lock.acquire()
         try:
-            browser = await uc.start(
-                headless=headless,
-                browser_args=[
-                    "--start-maximized",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--disable-ipc-flooding-protection",
-                ]
-            )
+            browser = await start_browser(headless)
             
             if cookie_file.exists():
                 try:
@@ -403,7 +393,6 @@ class ComixAPI:
     
     @classmethod
     async def _get_all_chapters_async(cls, manga_code: str, headless: bool) -> list[dict]:
-        uc = load_nodriver()
         from pathlib import Path
         
         url = f"https://comix.to/title/{manga_code}"
@@ -411,17 +400,7 @@ class ComixAPI:
         
         _browser_lock.acquire()
         try:
-            browser = await uc.start(
-                headless=headless,
-                browser_args=[
-                    "--start-maximized",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--disable-ipc-flooding-protection",
-                ]
-            )
+            browser = await start_browser(headless)
             
             if cookie_file.exists():
                 try:
@@ -579,7 +558,6 @@ class ComixAPI:
     async def _get_chapter_images_async(
         cls, chapter_id: int, manga_slug: str, chapter_number: str, headless: bool
     ) -> ChapterImageFetchReport:
-        uc = load_nodriver()
         from pathlib import Path
         
         chapter_url = f"https://comix.to/title/{manga_slug}/{chapter_id}-chapter-{chapter_number}"
@@ -587,17 +565,7 @@ class ComixAPI:
         
         _browser_lock.acquire()
         try:
-            browser = await uc.start(
-                headless=headless,
-                browser_args=[
-                    "--start-maximized",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--disable-ipc-flooding-protection",
-                ]
-            )
+            browser = await start_browser(headless)
             
             if cookie_file.exists():
                 try:
