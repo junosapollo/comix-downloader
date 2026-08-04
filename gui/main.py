@@ -18,6 +18,7 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QFontDatabase
 
 from gui.bridge import MangaBridge, DownloadBridge, SettingsBridge
+from src.utils.config import ConfigManager
 
 
 def load_fonts():
@@ -71,10 +72,12 @@ def main():
     # Create QML engine
     engine = QQmlApplicationEngine()
     
-    # Create bridge instances
-    manga_bridge = MangaBridge()
-    download_bridge = DownloadBridge()
-    settings_bridge = SettingsBridge()
+    # Use one in-memory configuration source for all GUI bridges.  This keeps
+    # settings changes visible to workers created later in the same session.
+    config_manager = ConfigManager()
+    manga_bridge = MangaBridge(config_manager=config_manager)
+    download_bridge = DownloadBridge(config_manager=config_manager)
+    settings_bridge = SettingsBridge(config_manager=config_manager)
     
     # Expose bridges to QML
     engine.rootContext().setContextProperty("MangaBridge", manga_bridge)
@@ -100,4 +103,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

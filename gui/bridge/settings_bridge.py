@@ -17,9 +17,11 @@ class SettingsBridge(QObject):
     # Signals
     settingsChanged = pyqtSignal()
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, config_manager=None):
         super().__init__(parent)
-        self._config_manager = ConfigManager()
+        self._config_manager = (
+            config_manager if config_manager is not None else ConfigManager()
+        )
     
     # Output Format
     @pyqtProperty(str, notify=settingsChanged)

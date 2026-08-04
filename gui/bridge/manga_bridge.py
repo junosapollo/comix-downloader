@@ -17,9 +17,10 @@ class FetchWorker(QThread):
     chaptersLoaded = pyqtSignal(list)
     error = pyqtSignal(str)
     
-    def __init__(self, url: str):
+    def __init__(self, url: str, headless: bool = True):
         super().__init__()
         self.url = url
+        self.headless = headless
     
     def run(self):
         try:
@@ -30,7 +31,7 @@ class FetchWorker(QThread):
             manga_code = ComixAPI.extract_manga_code(self.url)
             
             # Fetch manga info
-            manga = ComixAPI.get_manga_info(manga_code)
+            manga = ComixAPI.get_manga_info(manga_code, headless=self.headless)
             if not manga:
                 self.error.emit("Could not fetch manga information")
                 return
@@ -64,7 +65,7 @@ class FetchWorker(QThread):
             self.finished.emit(manga_dict)
             
             # Fetch chapters
-            chapters = ComixAPI.get_all_chapters(manga_code)
+            chapters = ComixAPI.get_all_chapters(manga_code, headless=self.headless)
             chapters_list = []
             for ch in chapters:
                 chapters_list.append({
@@ -93,12 +94,17 @@ class MangaBridge(QObject):
     errorOccurred = pyqtSignal(str)
     loadingChanged = pyqtSignal(bool)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, config_manager=None):
         super().__init__(parent)
         self._worker = None
         self._manga = None
         self._chapters = []
         self._manga_code = ""
+        if config_manager is None:
+            from src.utils.config import ConfigManager
+
+            config_manager = ConfigManager()
+        self._config_manager = config_manager
     
     @pyqtSlot(str)
     def fetchManga(self, url: str):
@@ -110,7 +116,8 @@ class MangaBridge(QObject):
         self.loadingChanged.emit(True)
         
         # Create and start worker thread
-        self._worker = FetchWorker(url)
+        headless = self._config_manager.get_download_config().headless
+        self._worker = FetchWorker(url, headless=headless)
         self._worker.finished.connect(self._on_manga_loaded)
         self._worker.chaptersLoaded.connect(self._on_chapters_loaded)
         self._worker.error.connect(self._on_error)

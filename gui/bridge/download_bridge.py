@@ -153,12 +153,15 @@ class DownloadBridge(QObject):
     downloadFinished = pyqtSignal(int, int)
     errorOccurred = pyqtSignal(str)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, config_manager=None):
         super().__init__(parent)
         self._worker = None
         # Import here to avoid circular imports
-        from src.utils.config import ConfigManager
-        self._config_manager = ConfigManager()
+        if config_manager is None:
+            from src.utils.config import ConfigManager
+
+            config_manager = ConfigManager()
+        self._config_manager = config_manager
     
     @pyqtSlot('QVariant', 'QVariant', str, str)
     def startDownload(self, manga: dict, chapters, format_type: str, scanlator: str):

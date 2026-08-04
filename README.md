@@ -93,6 +93,7 @@ python main.py download "https://comix.to/title/abc-manga-name" -c "1-10" -f cbz
 | Download Path | Where to save downloads | `downloads` |
 | Max Chapter Workers | Concurrent chapter downloads | `3` |
 | Max Image Workers | Concurrent image downloads per chapter | `5` |
+| Run Browser Headless | Hide the automation browser window | `Yes` |
 
 ---
 
