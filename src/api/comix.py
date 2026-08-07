@@ -379,8 +379,23 @@ class ComixAPI:
             error: error && error.message ? error.message : String(error),
         }}))"""
 
-        result_str = await page.evaluate(script)
-        result = json.loads(result_str) if result_str else {}
+        # nodriver does not await JavaScript promises by default. Without this
+        # flag the async IIFE returns before it resolves and evaluate() yields
+        # no serialized value, which used to become the misleading "Unknown
+        # Comix page API error" and trigger the timing-sensitive DOM fallback.
+        result_str = await page.evaluate(
+            script,
+            await_promise=True,
+            return_by_value=True,
+        )
+        if not isinstance(result_str, str) or not result_str:
+            raise RuntimeError("Comix page API evaluation returned no serialized result")
+        try:
+            result = json.loads(result_str)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Comix page API returned invalid JSON") from exc
+        if not isinstance(result, dict):
+            raise RuntimeError("Comix page API returned an invalid response object")
         if not result.get("ok"):
             raise RuntimeError(result.get("error") or "Unknown Comix page API error")
 

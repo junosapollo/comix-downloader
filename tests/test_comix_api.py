@@ -30,9 +30,11 @@ class FakePage:
     def __init__(self, result):
         self.result = result
         self.script = None
+        self.evaluate_kwargs = None
 
-    async def evaluate(self, script):
+    async def evaluate(self, script, **kwargs):
         self.script = script
+        self.evaluate_kwargs = kwargs
         return self.result
 
 
@@ -127,11 +129,27 @@ class ComixChapterTests(unittest.TestCase):
         self.assertEqual(rows[1]["group_name"], "Official")
         self.assertIn("api.chapters", page.script)
         self.assertIn("order: { number: 'desc' }", page.script)
+        self.assertEqual(
+            page.evaluate_kwargs,
+            {"await_promise": True, "return_by_value": True},
+        )
 
     def test_page_api_error_raises_useful_exception(self):
         page = FakePage('{"ok":false,"error":"Comix API module not found"}')
 
         with self.assertRaisesRegex(RuntimeError, "Comix API module not found"):
+            asyncio.run(ComixAPI._fetch_chapters_via_page_api(page, "y86v"))
+
+    def test_page_api_rejects_missing_serialized_result(self):
+        page = FakePage(None)
+
+        with self.assertRaisesRegex(RuntimeError, "no serialized result"):
+            asyncio.run(ComixAPI._fetch_chapters_via_page_api(page, "y86v"))
+
+    def test_page_api_rejects_invalid_json_result(self):
+        page = FakePage("not-json")
+
+        with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
             asyncio.run(ComixAPI._fetch_chapters_via_page_api(page, "y86v"))
 
 
