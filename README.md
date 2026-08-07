@@ -23,6 +23,7 @@
 | Feature | Description |
 |---------|-------------|
 | 🖥️ **Modern GUI** | Beautiful PyQt6/QML interface with dark theme |
+| 🔎 **Manga Discovery** | Search titles or browse trending/latest manga directly in the GUI |
 | 🎨 **Beautiful CLI** | Rich terminal interface with progress bars |
 | ⚡ **Concurrent Downloads** | Multi-threaded chapter and image downloads |
 | 📁 **Multiple Formats** | Export as **Images**, **PDF**, or **CBZ** |
@@ -65,8 +66,8 @@ python gui/main.py
 python gui/main.py --cpu
 ```
 
-1. Paste a manga URL from comix.to
-2. Click **FETCH** to load manga info and chapters
+1. Search for a manga title in the Browse screen, or paste a manga URL from comix.to
+2. Select a discovery result (or click **FETCH** for a URL) to load manga info and chapters
 3. Select chapters and choose scanlator preference/filter
 4. Click **DOWNLOAD CHAPTERS**
 5. Access **⚙️ Settings** to configure format, output path, workers
@@ -104,7 +105,7 @@ comix-downloader/
 ├── main.py                 # CLI entry point
 ├── gui/
 │   ├── main.py             # GUI entry point
-│   ├── bridge/             # Python-QML bridges
+│   ├── bridge/             # Python-QML bridges (downloads, details, discovery)
 │   └── qml/                # QML UI components
 ├── src/
 │   ├── api/comix.py        # API wrapper

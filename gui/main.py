@@ -17,7 +17,7 @@ from PyQt6.QtQml import QQmlApplicationEngine
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QFontDatabase
 
-from gui.bridge import MangaBridge, DownloadBridge, SettingsBridge
+from gui.bridge import DiscoveryBridge, DownloadBridge, MangaBridge, SettingsBridge
 from src.utils.config import ConfigManager
 
 
@@ -76,11 +76,13 @@ def main():
     # settings changes visible to workers created later in the same session.
     config_manager = ConfigManager()
     manga_bridge = MangaBridge(config_manager=config_manager)
+    discovery_bridge = DiscoveryBridge(config_manager=config_manager)
     download_bridge = DownloadBridge(config_manager=config_manager)
     settings_bridge = SettingsBridge(config_manager=config_manager)
     
     # Expose bridges to QML
     engine.rootContext().setContextProperty("MangaBridge", manga_bridge)
+    engine.rootContext().setContextProperty("DiscoveryBridge", discovery_bridge)
     engine.rootContext().setContextProperty("DownloadBridge", download_bridge)
     engine.rootContext().setContextProperty("SettingsBridge", settings_bridge)
     

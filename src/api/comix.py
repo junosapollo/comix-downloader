@@ -48,6 +48,9 @@ class ComixAPI:
     BASE_URL = "https://comix.to/api/v2"
     CHAPTERS_PAGE_LIMIT = 100
     MAX_CHAPTER_PAGES = 200
+    DISCOVERY_PAGE_LIMIT = 20
+    DISCOVERY_HIGHLIGHT_LIMIT = 8
+    DISCOVERY_CONTENT_RATINGS = ("safe", "suggestive", "erotica", "pornographic")
     
     @staticmethod
     def extract_manga_code(url: str) -> str:
@@ -60,6 +63,344 @@ class ComixAPI:
         code = last.split("-")[0]
         logger.debug(f"Extracted manga code: {code} from URL: {url}")
         return code
+
+    @classmethod
+    def _normalize_manga_summary(cls, item: dict):
+        """Normalize a catalog item returned by Comix's manga API."""
+        from ..core.models import MangaSummary
+
+        if not isinstance(item, dict):
+            return None
+
+        title = cls._first_present(item, "title", "name")
+        if not title:
+            return None
+
+        raw_url = cls._first_present(item, "url", "canonical_url", "canonicalUrl") or ""
+        if raw_url.startswith("/"):
+            canonical_url = f"https://comix.to{raw_url}"
+        elif raw_url.startswith("http://") or raw_url.startswith("https://"):
+            canonical_url = raw_url
+        else:
+            canonical_url = ""
+
+        manga_code = cls._first_present(item, "hid", "hash_id", "hashId", "manga_code", "code") or ""
+        if not manga_code and canonical_url:
+            try:
+                manga_code = cls.extract_manga_code(canonical_url)
+            except (IndexError, AttributeError):
+                manga_code = ""
+        if not manga_code:
+            return None
+
+        poster = cls._first_present(item, "poster", "cover") or {}
+        if isinstance(poster, dict):
+            poster_url = cls._first_present(poster, "large", "medium", "small") or ""
+        else:
+            poster_url = poster if isinstance(poster, str) else ""
+
+        manga_id = cls._first_present(item, "id", "manga_id", "mangaId")
+        try:
+            manga_id = int(manga_id) if manga_id is not None else None
+        except (TypeError, ValueError):
+            manga_id = None
+
+        year = cls._first_present(item, "year", "startDateYear")
+        try:
+            year = int(year) if year not in (None, "") else None
+        except (TypeError, ValueError):
+            year = None
+
+        rated_avg = cls._first_present(item, "ratedAvg", "rated_avg", "score")
+        try:
+            rated_avg = float(rated_avg) if rated_avg not in (None, "") else None
+        except (TypeError, ValueError):
+            rated_avg = None
+
+        content_rating = str(
+            cls._first_present(item, "contentRating", "content_rating") or "safe"
+        ).lower()
+
+        if not canonical_url:
+            canonical_url = f"https://comix.to/title/{manga_code}"
+
+        return MangaSummary(
+            manga_id=manga_id,
+            manga_code=str(manga_code),
+            title=str(title),
+            poster_url=str(poster_url),
+            manga_type=cls._first_present(item, "type", "manga_type"),
+            status=cls._first_present(item, "status"),
+            year=year,
+            latest_chapter=str(
+                cls._first_present(item, "latestChapter", "latest_chapter")
+                or ""
+            ),
+            rated_avg=rated_avg,
+            content_rating=content_rating,
+            canonical_url=canonical_url,
+        )
+
+    @classmethod
+    def _normalize_manga_browse_page(cls, payload: dict, requested_page: int = 1):
+        """Normalize a list response into the GUI-facing browse page model."""
+        from ..core.models import MangaBrowsePage
+
+        if not isinstance(payload, dict):
+            raise RuntimeError("Comix returned an invalid manga list response")
+
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list):
+            raw_items = payload.get("data") if isinstance(payload.get("data"), list) else []
+
+        items = []
+        seen_codes = set()
+        for item in raw_items:
+            summary = cls._normalize_manga_summary(item)
+            if summary and summary.manga_code not in seen_codes:
+                seen_codes.add(summary.manga_code)
+                items.append(summary)
+
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        try:
+            page = max(1, int(meta.get("page", requested_page)))
+        except (TypeError, ValueError):
+            page = max(1, requested_page)
+        try:
+            last_page = max(page, int(meta.get("lastPage", page)))
+        except (TypeError, ValueError):
+            last_page = page + 1 if meta.get("hasNext") else page
+        try:
+            total = max(0, int(meta.get("total", len(items))))
+        except (TypeError, ValueError):
+            total = len(items)
+
+        return MangaBrowsePage(items=items, page=page, last_page=last_page, total=total)
+
+    @classmethod
+    async def _fetch_discovery_via_page_api(
+        cls,
+        page,
+        *,
+        keyword: str = "",
+        page_number: int = 1,
+        limit: int = DISCOVERY_PAGE_LIMIT,
+        highlights: bool = False,
+    ) -> dict:
+        """Fetch catalog data through Comix's own in-page API client."""
+        script = f"""(async () => {{
+            const keyword = {json.dumps(keyword)};
+            const pageNumber = {int(page_number)};
+            const limit = {int(limit)};
+            const ratings = {json.dumps(list(cls.DISCOVERY_CONTENT_RATINGS))};
+            const highlights = {str(bool(highlights)).lower()};
+
+            async function resolveEnvModule() {{
+                const moduleScripts = Array.from(document.querySelectorAll('script[type="module"][src]'))
+                    .map((script) => script.src);
+
+                for (const scriptUrl of moduleScripts) {{
+                    try {{
+                        const response = await fetch(scriptUrl, {{ credentials: 'same-origin' }});
+                        if (!response.ok) continue;
+                        const source = await response.text();
+                        const matches = Array.from(source.matchAll(/from\\s*["']\\.\\/(env-[^"']+\\.js)["']/g));
+                        for (const match of matches) {{
+                            const moduleUrl = new URL(match[1], scriptUrl).href;
+                            try {{ return await import(moduleUrl); }} catch (e) {{}}
+                        }}
+                    }} catch (e) {{}}
+                }}
+                throw new Error('Comix API module not found');
+            }}
+
+            function findMangaApi(module) {{
+                for (const value of Object.values(module)) {{
+                    if (value && typeof value === 'object' &&
+                        typeof value.list === 'function' && typeof value.top === 'function') {{
+                        return value;
+                    }}
+                }}
+                return null;
+            }}
+
+            const module = await resolveEnvModule();
+            const api = findMangaApi(module);
+            if (!api) throw new Error('Comix manga API export not found');
+
+            if (highlights) {{
+                const trending = await api.top({{
+                    type: 'trending', days: 7, limit, content_rating: ratings,
+                }});
+                const latest = await api.list({{
+                    order: {{ chapter_updated_at: 'desc' }},
+                    page: 1, limit, content_rating: ratings,
+                }});
+                return JSON.stringify({{ ok: true, trending, latest }});
+            }}
+
+            const data = await api.list({{
+                keyword: keyword,
+                order: {{ relevance: 'desc' }},
+                page: pageNumber,
+                limit,
+                content_rating: ratings,
+            }});
+            return JSON.stringify({{ ok: true, data }});
+        }})().catch((error) => JSON.stringify({{
+            ok: false,
+            error: error && error.message ? error.message : String(error),
+        }}))"""
+
+        result_str = await page.evaluate(
+            script,
+            await_promise=True,
+            return_by_value=True,
+        )
+        if not isinstance(result_str, str) or not result_str:
+            raise RuntimeError("Comix discovery API returned no serialized result")
+        try:
+            result = json.loads(result_str)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Comix discovery API returned invalid JSON") from exc
+        if not isinstance(result, dict):
+            raise RuntimeError("Comix discovery API returned an invalid response object")
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or "Unknown Comix discovery API error")
+        return result
+
+    @classmethod
+    async def _get_discovery_async(
+        cls,
+        *,
+        keyword: str = "",
+        page_number: int = 1,
+        limit: int = DISCOVERY_PAGE_LIMIT,
+        highlights: bool = False,
+        headless: bool,
+    ) -> dict:
+        from pathlib import Path
+
+        cookie_file = Path("cf_cookies.dat")
+        _browser_lock.acquire()
+        try:
+            browser = await start_browser(headless)
+            if cookie_file.exists():
+                try:
+                    await browser.cookies.load(str(cookie_file))
+                    logger.info("Loaded cookies from %s", cookie_file)
+                except Exception as exc:
+                    logger.warning("Failed loading cookies: %s", exc)
+        finally:
+            _browser_lock.release()
+
+        try:
+            page = await browser.get("https://comix.to/browse")
+            title = ""
+            for _ in range(60):
+                title = (await page.evaluate("document.title")) or ""
+                if "moment" not in title.lower():
+                    break
+                if headless:
+                    raise RuntimeError(
+                        "Comix Cloudflare verification is active. Disable headless mode in Settings and retry."
+                    )
+                await page.sleep(1)
+
+            if "moment" in title.lower():
+                raise RuntimeError("Comix Cloudflare verification did not complete in time")
+
+            result = await cls._fetch_discovery_via_page_api(
+                page,
+                keyword=keyword,
+                page_number=page_number,
+                limit=limit,
+                highlights=highlights,
+            )
+
+            _browser_lock.acquire()
+            try:
+                await browser.cookies.save(str(cookie_file), pattern=".*")
+            except Exception as exc:
+                logger.warning("Failed saving cookies: %s", exc)
+            finally:
+                _browser_lock.release()
+            return result
+        finally:
+            browser.stop()
+
+    @classmethod
+    def search_manga(
+        cls,
+        keyword: str,
+        page: int = 1,
+        limit: int = DISCOVERY_PAGE_LIMIT,
+        headless: Optional[bool] = None,
+    ):
+        """Search the Comix catalog for manga summaries."""
+        from ..core.models import MangaBrowsePage
+        from ..utils.config import ConfigManager
+
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return MangaBrowsePage()
+        if headless is None:
+            headless = ConfigManager().get("headless", True)
+        page = max(1, int(page))
+        try:
+            result = run_async(
+                cls._get_discovery_async(
+                    keyword=keyword,
+                    page_number=page,
+                    limit=limit,
+                    highlights=False,
+                    headless=headless,
+                )
+            )
+            return cls._normalize_manga_browse_page(result.get("data", {}), page)
+        except Exception:
+            logger.exception("Discovery search failed for %r", keyword)
+            raise
+
+    @classmethod
+    def get_manga_highlights(
+        cls,
+        limit: int = DISCOVERY_HIGHLIGHT_LIMIT,
+        headless: Optional[bool] = None,
+    ) -> dict[str, list]:
+        """Fetch compact trending and latest catalog rails for the GUI."""
+        from ..utils.config import ConfigManager
+
+        if headless is None:
+            headless = ConfigManager().get("headless", True)
+        try:
+            result = run_async(
+                cls._get_discovery_async(
+                    limit=limit,
+                    highlights=True,
+                    headless=headless,
+                )
+            )
+            trending = result.get("trending", [])
+            latest_payload = result.get("latest", {})
+            if not isinstance(trending, list):
+                trending = []
+            if not isinstance(latest_payload, dict):
+                latest_payload = {}
+            latest = latest_payload.get("items", [])
+            return {
+                "trending": [
+                    summary for item in trending
+                    if (summary := cls._normalize_manga_summary(item)) is not None
+                ],
+                "latest": [
+                    summary for item in latest
+                    if (summary := cls._normalize_manga_summary(item)) is not None
+                ],
+            }
+        except Exception:
+            logger.exception("Discovery highlights failed")
+            raise
     
     @classmethod
     async def _get_manga_info_async(cls, manga_code: str, headless: bool) -> Optional[str]:

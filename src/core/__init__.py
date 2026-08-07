@@ -1,6 +1,13 @@
-from .models import MangaInfo, Chapter, DownloadConfig
+from .models import Chapter, DownloadConfig, MangaBrowsePage, MangaInfo, MangaSummary
 
-__all__ = ["MangaInfo", "Chapter", "DownloadConfig", "MangaDownloader"]
+__all__ = [
+    "MangaInfo",
+    "MangaSummary",
+    "MangaBrowsePage",
+    "Chapter",
+    "DownloadConfig",
+    "MangaDownloader",
+]
 
 
 def __getattr__(name):

@@ -18,8 +18,28 @@ Rectangle {
     radius: 12
     
     signal fetchRequested(string url)
-    
-    property bool isLoading: false
+    signal searchRequested(string query)
+
+    property bool mangaLoading: false
+    property bool discoveryLoading: false
+    readonly property bool isLoading: mangaLoading || discoveryLoading
+
+    function isUrlInput(value) {
+        var normalized = (value || "").trim().toLowerCase()
+        return normalized.indexOf("http://") === 0
+                || normalized.indexOf("https://") === 0
+                || normalized.indexOf("comix.to/title/") >= 0
+    }
+
+    function submit() {
+        var value = urlField.text.trim()
+        if (!value || root.isLoading)
+            return
+        if (root.isUrlInput(value))
+            root.fetchRequested(value)
+        else
+            root.searchRequested(value)
+    }
     
     RowLayout {
         anchors.fill: parent
@@ -28,7 +48,7 @@ Rectangle {
         
         // LINK ICON
         Text {
-            text: "🔗"
+            text: root.isUrlInput(urlField.text) ? "🔗" : "⌕"
             font.pixelSize: 18
             opacity: 0.7
         }
@@ -36,10 +56,11 @@ Rectangle {
         // TEXT INPUT
         TextField {
             id: urlField
+            objectName: "inputField"
             Layout.fillWidth: true
             Layout.fillHeight: true
             
-            placeholderText: "Paste manga URL here..."
+            placeholderText: "Search manga or paste a Comix.to URL..."
             placeholderTextColor: textTertiary
             color: textPrimary
             font.family: "Segoe UI"
@@ -73,9 +94,7 @@ Rectangle {
             }
             
             Keys.onReturnPressed: {
-                if (text.length > 0 && !root.isLoading) {
-                    root.fetchRequested(text)
-                }
+                root.submit()
             }
         }
         
@@ -102,7 +121,7 @@ Rectangle {
             
             Text {
                 anchors.centerIn: parent
-                text: root.isLoading ? "..." : "FETCH"
+                text: root.isLoading ? "..." : (root.isUrlInput(urlField.text) ? "FETCH" : "SEARCH")
                 font.family: "Segoe UI"
                 font.pixelSize: 12
                 font.weight: Font.Bold
@@ -118,9 +137,7 @@ Rectangle {
                 enabled: !root.isLoading
                 
                 onClicked: {
-                    if (urlField.text.length > 0) {
-                        root.fetchRequested(urlField.text)
-                    }
+                    root.submit()
                 }
             }
         }
@@ -129,7 +146,14 @@ Rectangle {
     Connections {
         target: MangaBridge
         function onLoadingChanged(loading) {
-            root.isLoading = loading
+            root.mangaLoading = loading
+        }
+    }
+
+    Connections {
+        target: DiscoveryBridge
+        function onLoadingChanged(loading) {
+            root.discoveryLoading = loading
         }
     }
 }

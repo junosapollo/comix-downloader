@@ -21,6 +21,41 @@ class OutputFormat(str, Enum):
     CBZ = "cbz"
 
 
+@dataclass(frozen=True)
+class MangaSummary:
+    """Compact manga row used by discovery/search views."""
+
+    manga_id: Optional[int] = None
+    manga_code: str = ""
+    title: str = "Unknown"
+    poster_url: str = ""
+    manga_type: Optional[str] = None
+    status: Optional[str] = None
+    year: Optional[int] = None
+    latest_chapter: Optional[str] = None
+    rated_avg: Optional[float] = None
+    content_rating: str = "safe"
+    canonical_url: str = ""
+
+
+@dataclass(frozen=True)
+class MangaBrowsePage:
+    """A page of manga summaries returned by the Comix catalog."""
+
+    items: list[MangaSummary] = field(default_factory=list)
+    page: int = 1
+    last_page: int = 1
+    total: int = 0
+
+    @property
+    def has_next(self) -> bool:
+        return self.page < self.last_page
+
+    @property
+    def has_previous(self) -> bool:
+        return self.page > 1
+
+
 @dataclass
 class MangaInfo:
     """Manga information from API."""

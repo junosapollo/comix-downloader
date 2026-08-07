@@ -84,9 +84,9 @@ ApplicationWindow {
     // CONNECTIONS TO PYTHON BRIDGES
     Connections {
         target: MangaBridge
-        function onMangaLoaded(info) { browseView.getMangaCard().manga = info }
-        function onChaptersLoaded(chapters) { browseView.getChapterList().setChapters(chapters) }
-        function onErrorOccurred(error) { console.log("Manga Error:", error) }
+        function onMangaLoaded(info) { browseView.showManga(info) }
+        function onChaptersLoaded(chapters) { browseView.showChapters(chapters) }
+        function onErrorOccurred(error) { browseView.showMangaError(error) }
     }
     
     Connections {

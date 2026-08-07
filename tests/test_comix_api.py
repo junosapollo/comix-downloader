@@ -39,6 +39,103 @@ class FakePage:
 
 
 class ComixChapterTests(unittest.TestCase):
+    def test_normalizes_manga_summary_shape(self):
+        summary = ComixAPI._normalize_manga_summary({
+            "id": 42,
+            "hid": "abc12",
+            "title": "Example Manga",
+            "type": "manhwa",
+            "status": "releasing",
+            "year": "2025",
+            "latestChapter": 18,
+            "ratedAvg": "8.7",
+            "contentRating": "erotica",
+            "poster": {"medium": "https://static.example/cover.jpg"},
+            "url": "/title/abc12-example-manga",
+        })
+
+        self.assertEqual(summary.manga_id, 42)
+        self.assertEqual(summary.manga_code, "abc12")
+        self.assertEqual(summary.title, "Example Manga")
+        self.assertEqual(summary.poster_url, "https://static.example/cover.jpg")
+        self.assertEqual(summary.year, 2025)
+        self.assertEqual(summary.latest_chapter, "18")
+        self.assertEqual(summary.rated_avg, 8.7)
+        self.assertEqual(summary.content_rating, "erotica")
+        self.assertEqual(summary.canonical_url, "https://comix.to/title/abc12-example-manga")
+
+    def test_normalizes_manga_summary_from_url_when_hash_is_missing(self):
+        summary = ComixAPI._normalize_manga_summary({
+            "title": "URL Only",
+            "url": "https://comix.to/title/u77-url-only",
+        })
+
+        self.assertEqual(summary.manga_code, "u77")
+        self.assertEqual(summary.canonical_url, "https://comix.to/title/u77-url-only")
+
+    def test_rejects_manga_summary_without_identity(self):
+        self.assertIsNone(ComixAPI._normalize_manga_summary({"title": "No URL"}))
+        self.assertIsNone(ComixAPI._normalize_manga_summary({"hid": "abc"}))
+
+    def test_normalizes_manga_browse_page_and_deduplicates(self):
+        page = ComixAPI._normalize_manga_browse_page({
+            "items": [
+                {"hid": "a1", "title": "One", "url": "/title/a1-one"},
+                {"hid": "a1", "title": "Duplicate", "url": "/title/a1-duplicate"},
+                {"hid": "b2", "title": "Two", "url": "/title/b2-two"},
+            ],
+            "meta": {"page": 2, "lastPage": 5, "total": 41},
+        }, requested_page=2)
+
+        self.assertEqual([item.manga_code for item in page.items], ["a1", "b2"])
+        self.assertEqual(page.page, 2)
+        self.assertEqual(page.last_page, 5)
+        self.assertEqual(page.total, 41)
+        self.assertTrue(page.has_next)
+        self.assertTrue(page.has_previous)
+
+    def test_discovery_page_api_uses_current_client_and_all_ratings(self):
+        page = FakePage(
+            '{"ok":true,"data":{"items":['
+            '{"hid":"a1","title":"One","url":"/title/a1-one"}'
+            '],"meta":{"page":1,"lastPage":1,"total":1}}}'
+        )
+
+        result = asyncio.run(ComixAPI._fetch_discovery_via_page_api(
+            page, keyword="one", page_number=2, limit=20
+        ))
+
+        self.assertTrue(result["ok"])
+        self.assertIn("api.list", page.script)
+        self.assertIn("relevance: 'desc'", page.script)
+        self.assertIn("safe", page.script)
+        self.assertIn("pornographic", page.script)
+        self.assertIn('const pageNumber = 2', page.script)
+        self.assertEqual(page.evaluate_kwargs, {"await_promise": True, "return_by_value": True})
+
+    def test_discovery_page_api_reports_errors(self):
+        page = FakePage('{"ok":false,"error":"catalog unavailable"}')
+
+        with self.assertRaisesRegex(RuntimeError, "catalog unavailable"):
+            asyncio.run(ComixAPI._fetch_discovery_via_page_api(page))
+
+    def test_discovery_highlights_use_trending_and_latest_calls(self):
+        page = FakePage(
+            '{"ok":true,"trending":['
+            '{"hid":"t1","title":"Trend","url":"/title/t1-trend"}],'
+            '"latest":{"items":['
+            '{"hid":"l1","title":"Latest","url":"/title/l1-latest"}]}}'
+        )
+
+        result = asyncio.run(ComixAPI._fetch_discovery_via_page_api(
+            page, highlights=True, limit=8
+        ))
+
+        self.assertEqual(result["trending"][0]["title"], "Trend")
+        self.assertIn("api.top", page.script)
+        self.assertIn("days: 7", page.script)
+        self.assertIn("chapter_updated_at: 'desc'", page.script)
+
     def test_normalizes_current_chapter_api_shape(self):
         row = ComixAPI._normalize_chapter_api_item({
             "id": "9744989",

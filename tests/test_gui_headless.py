@@ -6,11 +6,13 @@ from unittest.mock import patch
 
 try:
     from PyQt6.QtCore import QCoreApplication
+    from gui.bridge.discovery_bridge import DiscoveryBridge
     from gui.bridge.download_bridge import DownloadBridge
     from gui.bridge.manga_bridge import FetchWorker, MangaBridge
     from gui.bridge.settings_bridge import SettingsBridge
 except ImportError:  # pragma: no cover - exercised only in minimal environments
     QCoreApplication = None
+    DiscoveryBridge = None
     DownloadBridge = None
     FetchWorker = None
     MangaBridge = None
@@ -74,6 +76,26 @@ class GuiHeadlessConfigTests(unittest.TestCase):
 
         self.assertTrue(manga_info.call_args.kwargs["headless"])
         self.assertTrue(all_chapters.call_args.kwargs["headless"])
+
+    def test_discovery_bridge_uses_shared_config_manager(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_manager = self._config(tmpdir, headless=False)
+            bridge = DiscoveryBridge(config_manager=config_manager)
+
+            self.assertIs(bridge._config_manager, config_manager)
+            with patch("gui.bridge.discovery_bridge.DiscoveryWorker") as worker_factory:
+                bridge.loadHighlights()
+                self.assertFalse(worker_factory.call_args.kwargs["headless"])
+
+    def test_discovery_bridge_snapshots_headless_setting_for_search(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_manager = self._config(tmpdir, headless=False)
+            bridge = DiscoveryBridge(config_manager=config_manager)
+
+            with patch("gui.bridge.discovery_bridge.DiscoveryWorker") as worker_factory:
+                bridge.search("hero", 2)
+                self.assertEqual(worker_factory.call_args.args[:3], ("search", "hero", 2))
+                self.assertFalse(worker_factory.call_args.kwargs["headless"])
 
 
 if __name__ == "__main__":
