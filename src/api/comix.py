@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Optional
 from ..utils.retry import retry_with_backoff
 from ..utils.logger import get_logger
-from ..utils.session import get_session
 from ..utils.hash import generate_comix_hash
 from ..utils.nodriver_browser import start_browser
 from ..utils.nodriver_compat import load_cdp_page
@@ -30,10 +29,16 @@ _CLOUDFLARE_POLL_SECONDS = 0.25
 _CLOUDFLARE_TITLE = "just a moment..."
 _INITIAL_DATA_TIMEOUT_SECONDS = 15.0
 _INITIAL_DATA_POLL_SECONDS = 0.05
+_CHAPTER_EXTRACTION_MIN_SECONDS = 180.0
+_CHAPTER_EXTRACTION_MAX_SECONDS = 900.0
 
 
 class MangaInfoFetchError(RuntimeError):
     """Raised when Comix does not expose a complete manga detail payload."""
+
+
+class ComixPageUnavailableError(RuntimeError):
+    """Raised when a valid browser response is a terminal not-found page."""
 
 
 def _cookie_file_candidates() -> list[Path]:
@@ -66,6 +71,30 @@ async def _start_comix_browser(headless: bool):
         return browser
     finally:
         _browser_lock.release()
+
+
+async def _close_comix_browser(browser) -> None:
+    """Close the CDP connection before terminating Chrome.
+
+    nodriver's ``stop`` schedules ``aclose`` as a background task.  The task
+    can be lost when the ``asyncio.run`` loop closes, leaving a child process or
+    websocket behind.  Await it here and retain ``stop`` as the final fallback
+    for compatible nodriver facades and test doubles.
+    """
+    if browser is None:
+        return
+    aclose = getattr(browser, "aclose", None)
+    if callable(aclose):
+        try:
+            await asyncio.wait_for(aclose(), timeout=3.0)
+        except Exception as exc:
+            logger.debug("Browser connection close failed: %s", exc)
+    stop = getattr(browser, "stop", None)
+    if callable(stop):
+        try:
+            stop()
+        except Exception as exc:
+            logger.debug("Browser process stop failed: %s", exc)
 
 
 async def _save_comix_cookies(browser) -> None:
@@ -130,6 +159,7 @@ async def _wait_for_comix_page(
     headless: bool,
     operation: str,
     timeout: float = _CLOUDFLARE_TIMEOUT_SECONDS,
+    unavailable_script: str | None = None,
 ) -> None:
     """Wait for Cloudflare verification and operation-specific DOM readiness."""
     deadline = time.monotonic() + timeout
@@ -140,9 +170,15 @@ async def _wait_for_comix_page(
             last_title = (await page.evaluate("document.title")) or ""
             challenge = await _page_has_cloudflare_challenge(page)
             saw_challenge = saw_challenge or challenge
+            if unavailable_script and bool(await page.evaluate(unavailable_script)):
+                raise ComixPageUnavailableError(
+                    f"Comix {operation} is unavailable (the requested route was not found)"
+                )
             ready = bool(await page.evaluate(ready_script))
             if ready and not challenge:
                 return
+        except ComixPageUnavailableError:
+            raise
         except Exception:
             pass
         await page.sleep(_CLOUDFLARE_POLL_SECONDS)
@@ -238,6 +274,7 @@ class ChapterImageFetchReport:
     page_count: int = 0
     skipped_pages: list[int] = field(default_factory=list)
     failed_pages: list[int] = field(default_factory=list)
+    page_numbers: list[int] = field(default_factory=list)
 
     @property
     def expected_image_count(self) -> int:
@@ -510,7 +547,7 @@ class ComixAPI:
             )
             return result
         finally:
-            browser.stop()
+            await _close_comix_browser(browser)
 
     @classmethod
     def search_manga(
@@ -608,7 +645,7 @@ class ComixAPI:
             return initial_data
             
         finally:
-            browser.stop()
+            await _close_comix_browser(browser)
             
     @classmethod
     def get_manga_info(cls, manga_code: str, headless: Optional[bool] = None):
@@ -987,7 +1024,7 @@ class ComixAPI:
 
             return all_rows
         finally:
-            browser.stop()
+            await _close_comix_browser(browser)
 
     @classmethod
     def get_all_chapters(cls, manga_code: str, headless: Optional[bool] = None) -> list[any]:
@@ -1023,15 +1060,23 @@ class ComixAPI:
     
     @classmethod
     async def _get_chapter_images_async(
-        cls, chapter_id: int, manga_slug: str, chapter_number: str, headless: bool
+        cls,
+        chapter_id: int,
+        manga_slug: str,
+        chapter_number: str,
+        headless: bool,
+        browser=None,
     ) -> ChapterImageFetchReport:
         chapter_url = f"https://comix.to/title/{manga_slug}/{chapter_id}-chapter-{chapter_number}"
-        browser = await _start_comix_browser(headless)
+        owns_browser = browser is None
+        if owns_browser:
+            browser = await _start_comix_browser(headless)
                 
         image_urls = []
         page_count = 0
         skipped_pages = []
         failed_pages = []
+        page_numbers = []
         
         try:
             # Setup init script to backup original toDataURL and set localStorage reader.default preload config
@@ -1060,6 +1105,10 @@ class ComixAPI:
                 headless=headless,
                 operation="chapter reader",
                 timeout=90.0,
+                unavailable_script=(
+                    "Boolean(document.body && /could not be found|page not found|404/i.test("
+                    "document.body.innerText || ''))"
+                ),
             )
             page_count = await page.evaluate("document.querySelectorAll('.rpage-page').length") or 0
             await _publish_comix_session(browser, page)
@@ -1082,8 +1131,19 @@ class ComixAPI:
                 await page.sleep(0.2)
                 
             logger.info(f"Chapter has {page_count} pages. Extracting content...")
+            extraction_deadline = time.monotonic() + min(
+                _CHAPTER_EXTRACTION_MAX_SECONDS,
+                max(_CHAPTER_EXTRACTION_MIN_SECONDS, page_count * 5.0),
+            )
             
             for page_num in range(1, page_count + 1):
+                if time.monotonic() >= extraction_deadline:
+                    failed_pages.extend(range(page_num, page_count + 1))
+                    logger.error(
+                        "Chapter extraction deadline reached after %s pages",
+                        page_num - 1,
+                    )
+                    break
                 # Scroll page element into view to trigger render/decryption
                 try:
                     await page.evaluate(
@@ -1148,6 +1208,7 @@ class ComixAPI:
                     
                 if ready.get('type') == 'canvas_data':
                     image_urls.append(ready.get('data'))
+                    page_numbers.append(page_num)
                     continue
                     
                 # Extract image data or URL from image
@@ -1194,13 +1255,21 @@ class ComixAPI:
                     
                 if extracted_url:
                     image_urls.append(extracted_url)
+                    page_numbers.append(page_num)
                 else:
                     logger.error(f"Page {page_num} failed to extract valid URL or data.")
                     failed_pages.append(page_num)
             
-            return ChapterImageFetchReport(image_urls, page_count, skipped_pages, failed_pages)
+            return ChapterImageFetchReport(
+                image_urls,
+                page_count,
+                skipped_pages,
+                failed_pages,
+                page_numbers,
+            )
         finally:
-            browser.stop()
+            if owns_browser:
+                await _close_comix_browser(browser)
 
     @classmethod
     def get_chapter_image_report(cls, chapter_id: int, manga_slug: str = None, chapter_number: str = None, headless: Optional[bool] = None) -> ChapterImageFetchReport:
@@ -1234,3 +1303,100 @@ class ComixAPI:
             chapter_number=chapter_number,
             headless=headless,
         ).image_urls
+
+
+class ChapterReaderService:
+    """Serialize chapter extraction through one reusable browser process.
+
+    The downloader still uses chapter workers and a shared image pool, but
+    reader extraction is owned by this service so a twelve-chapter job cannot
+    spawn twelve independent Chrome processes.  A dedicated event-loop thread
+    keeps nodriver objects on the loop where they were created.
+    """
+
+    def __init__(self, headless: bool):
+        self.headless = bool(headless)
+        self._loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._closed = False
+        self._browser = None
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            name="comix-chapter-reader",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._ready.wait(timeout=10):
+            raise RuntimeError("Chapter reader event loop did not start")
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        try:
+            self._loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self._loop.close()
+
+    async def _ensure_browser(self):
+        if self._browser is None:
+            self._browser = await _start_comix_browser(self.headless)
+        return self._browser
+
+    async def _fetch(self, chapter_id: int, manga_slug: str, chapter_number: str):
+        # The lock is intentionally async: queued chapter tasks do not occupy
+        # additional Chrome processes or threads while waiting their turn.
+        if not hasattr(self, "_operation_lock"):
+            self._operation_lock = asyncio.Lock()
+        async with self._operation_lock:
+            last_error = None
+            for attempt in range(2):
+                try:
+                    browser = await self._ensure_browser()
+                    return await ComixAPI._get_chapter_images_async(
+                        chapter_id,
+                        manga_slug,
+                        chapter_number,
+                        self.headless,
+                        browser=browser,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    await _close_comix_browser(self._browser)
+                    self._browser = None
+                    if attempt == 0:
+                        logger.warning(
+                            "Chapter reader browser failed; restarting once: %s",
+                            exc,
+                        )
+            raise last_error
+
+    def fetch(self, chapter_id: int, manga_slug: str, chapter_number: str):
+        if self._closed:
+            raise RuntimeError("Chapter reader service is closed")
+        future = asyncio.run_coroutine_threadsafe(
+            self._fetch(chapter_id, manga_slug, chapter_number),
+            self._loop,
+        )
+        return future.result()
+
+    async def _shutdown(self) -> None:
+        await _close_comix_browser(self._browser)
+        self._browser = None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
+            future.result(timeout=10)
+        except Exception as exc:
+            logger.debug("Chapter reader shutdown failed: %s", exc)
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=10)

@@ -188,6 +188,66 @@ class ComixChapterTests(unittest.TestCase):
                 timeout=0.01,
             ))
 
+    def test_not_found_reader_route_fails_immediately(self):
+        class MissingPage:
+            async def evaluate(self, script, **kwargs):
+                if script == "document.title":
+                    return "Comix"
+                if "document.body" in script:
+                    return True
+                if "#challenge-running" in script:
+                    return False
+                return False
+
+            async def sleep(self, _seconds):
+                raise AssertionError("not-found route should not wait for timeout")
+
+        with self.assertRaises(comix_module.ComixPageUnavailableError):
+            asyncio.run(comix_module._wait_for_comix_page(
+                MissingPage(),
+                "document.querySelectorAll('.rpage-page').length > 0",
+                headless=True,
+                operation="chapter reader",
+                timeout=1,
+                unavailable_script="Boolean(document.body)",
+            ))
+
+    def test_reader_service_reuses_browser_and_closes_it(self):
+        class Browser:
+            def __init__(self):
+                self.closed = 0
+                self.stopped = 0
+
+            async def aclose(self):
+                self.closed += 1
+
+            def stop(self):
+                self.stopped += 1
+
+        browser = Browser()
+        reports = []
+
+        async def start(_headless):
+            return browser
+
+        async def fetch(_cls, chapter_id, _slug, _number, _headless, browser=None):
+            reports.append((chapter_id, browser))
+            return comix_module.ChapterImageFetchReport(["data:image/webp;base64,AA=="], 1)
+
+        with patch.object(comix_module, "_start_comix_browser", new=start), \
+                patch.object(ComixAPI, "_get_chapter_images_async", new=classmethod(fetch)):
+            service = comix_module.ChapterReaderService(True)
+            try:
+                service.fetch(1, "example", "1")
+                service.fetch(2, "example", "2")
+            finally:
+                service.close()
+
+        self.assertEqual([item[0] for item in reports], [1, 2])
+        self.assertIs(reports[0][1], reports[1][1])
+        self.assertEqual(browser.closed, 1)
+        self.assertEqual(browser.stopped, 1)
+
     def test_title_containing_moment_is_not_misclassified(self):
         class NormalPage(ChallengePage):
             async def evaluate(self, script, **kwargs):

@@ -18,4 +18,4 @@ if __name__ == "__main__":
         app()
     else:
         # Interactive mode
-        main()
+        sys.exit(main() or 0)

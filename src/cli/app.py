@@ -14,9 +14,10 @@ from ..api.comix import ComixAPI
 from ..core.downloader import MangaDownloader, cancel_downloads
 from ..core.models import OutputFormat
 from ..utils.config import ConfigManager
-from ..utils.logger import setup_logging
+from ..utils.logger import get_logger, setup_logging
 
 console = Console()
+logger = get_logger(__name__)
 app = typer.Typer(
     name="comix-downloader",
     help="🎨 Beautiful Manga Downloader CLI for comix.to",
@@ -156,7 +157,8 @@ def main():
         sys.exit(0)
     except Exception as e:
         console.print(f"\n[bold red]Fatal error: {e}[/]\n")
-        raise
+        logger.exception("Interactive CLI failed")
+        return 1
 
 
 @app.command()

@@ -29,7 +29,7 @@
 | 📁 **Multiple Formats** | Export as **Images**, **PDF**, or **CBZ** |
 | 🎯 **Smart Selection** | Download single, range (`1-10`), or all chapters |
 | 🎨 **Scanlator Filter** | Filter and prefer specific scanlator groups |
-| ⚙️ **Persistent Settings** | All preferences saved to `config.json` |
+| ⚙️ **Persistent Settings** | CLI and GUI share one user settings file |
 
 ---
 
@@ -86,6 +86,10 @@ python main.py download "https://comix.to/title/abc-manga-name" -c "1-10" -f cbz
 
 ## ⚙️ Settings
 
+Settings are stored in the platform user configuration directory so CLI and
+GUI launches use the same values regardless of the current working directory.
+The legacy root and `gui/config.json` files are imported once and left intact.
+
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Output Format | images / pdf / cbz | `images` |
@@ -93,7 +97,7 @@ python main.py download "https://comix.to/title/abc-manga-name" -c "1-10" -f cbz
 | Enable Logs | Show debug logging | `No` |
 | Download Path | Where to save downloads | `downloads` |
 | Max Chapter Workers | Concurrent chapter downloads | `3` |
-| Max Image Workers | Concurrent image downloads per chapter | `5` |
+| Max Image Workers | Application-wide concurrent image downloads | `5` |
 | Run Browser Headless | Hide the automation browser window | `Yes` |
 
 ---
@@ -114,7 +118,7 @@ comix-downloader/
 │   ├── cli/                # CLI application
 │   └── utils/              # Config, logging, session, compatibility helpers
 ├── tests/                  # Unit tests
-└── config.json             # User settings
+└── config.json             # Legacy settings imported on first run
 ```
 
 ---

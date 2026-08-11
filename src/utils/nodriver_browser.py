@@ -3,6 +3,7 @@ Shared nodriver browser launch helpers.
 """
 
 import threading
+import os
 from typing import Any
 
 from .logger import get_logger
@@ -24,6 +25,23 @@ _HEADLESS_WINDOW_SIZE = "1920,1080"
 
 _user_agent_cache: str | None = None
 _user_agent_cache_lock = threading.Lock()
+
+
+def _sandbox_enabled() -> bool:
+    """Use Chrome's sandbox except where root execution makes it impossible."""
+    return not (os.name == "posix" and getattr(os, "geteuid", lambda: 1)() == 0)
+
+
+def _make_config(config_factory: Any, *, headless: bool, browser_args: list[str]):
+    """Create a Config while remaining compatible with lightweight facades."""
+    try:
+        return config_factory(
+            headless=headless,
+            browser_args=list(browser_args),
+            sandbox=_sandbox_enabled(),
+        )
+    except TypeError:
+        return config_factory(headless=headless, browser_args=list(browser_args))
 
 
 def get_browser_args(headless: bool, platform: str | None = None) -> list[str]:
@@ -103,7 +121,7 @@ async def _probe_desktop_user_agent(uc: Any, config_factory: Any) -> str:
     command (notably Windows builds).  It never visits Comix or loads cookies.
     """
     probe_args = get_browser_args(True)
-    probe_config = config_factory(headless=True, browser_args=probe_args)
+    probe_config = _make_config(config_factory, headless=True, browser_args=probe_args)
     probe_browser = await uc.start(
         config=probe_config,
         headless=True,
@@ -117,7 +135,15 @@ async def _probe_desktop_user_agent(uc: Any, config_factory: Any) -> str:
                 reported = await tab.evaluate("navigator.userAgent")
         return normalize_desktop_user_agent(reported or "")
     finally:
-        probe_browser.stop()
+        aclose = getattr(probe_browser, "aclose", None)
+        if callable(aclose):
+            try:
+                await aclose()
+            except Exception:
+                pass
+        stop = getattr(probe_browser, "stop", None)
+        if callable(stop):
+            stop()
 
 
 async def _get_desktop_user_agent(uc: Any, config_factory: Any) -> str:
@@ -154,7 +180,7 @@ async def start_browser(headless: bool, nodriver: Any = None):
     if config_factory is None:
         return await uc.start(headless=headless, browser_args=browser_args)
 
-    config = config_factory(headless=headless, browser_args=browser_args)
+    config = _make_config(config_factory, headless=headless, browser_args=browser_args)
     _validate_effective_args(headless, list(config()))
     desktop_user_agent = await _get_desktop_user_agent(uc, config_factory)
     user_agent_arg = f"--user-agent={desktop_user_agent}"
@@ -162,7 +188,9 @@ async def start_browser(headless: bool, nodriver: Any = None):
     if not callable(add_argument):
         raise RuntimeError("nodriver Config cannot apply the normalized desktop user agent")
     add_argument(user_agent_arg)
-    browser_args.append(user_agent_arg)
+    # Config receives a copied argument list, so adding the argument to the
+    # launch request here does not duplicate it inside Config._browser_args.
+    browser_args = list(browser_args) + [user_agent_arg]
     effective_args = list(config())
     _validate_effective_args(headless, effective_args)
     logger.debug(

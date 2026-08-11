@@ -20,6 +20,7 @@ from PyQt6.QtGui import QFontDatabase
 from gui.bridge import DiscoveryBridge, DownloadBridge, MangaBridge, SettingsBridge
 from gui.cover_image_provider import ComixCoverImageProvider, provider_name
 from src.utils.config import ConfigManager
+from src.utils.logger import setup_logging
 
 
 def load_fonts():
@@ -78,6 +79,7 @@ def main():
     # Use one in-memory configuration source for all GUI bridges.  This keeps
     # settings changes visible to workers created later in the same session.
     config_manager = ConfigManager()
+    setup_logging(enable=bool(config_manager.get("enable_logs", False)))
     manga_bridge = MangaBridge(config_manager=config_manager)
     discovery_bridge = DiscoveryBridge(config_manager=config_manager)
     download_bridge = DownloadBridge(config_manager=config_manager)

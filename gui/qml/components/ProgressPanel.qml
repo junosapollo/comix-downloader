@@ -39,14 +39,25 @@ Rectangle {
     function setChapterStatus(name, s, message) {
         currentChapter = name
         if (s) successCount++; else failCount++
-        
+        var found = false
         // Mark task as complete in the list
         for (var i = 0; i < taskModel.count; i++) {
             if (taskModel.get(i).name === name) {
+                found = true
                 taskModel.setProperty(i, "status", s ? "Complete" : "Failed")
                 taskModel.setProperty(i, "progress", 100)
+                if (!s && message && message.length > 0)
+                    taskModel.setProperty(i, "details", message)
                 break
             }
+        }
+        if (!found) {
+            taskModel.append({
+                "name": name,
+                "progress": 100,
+                "details": s ? "Complete" : (message || "Failed"),
+                "status": s ? "Complete" : "Failed"
+            })
         }
     }
     
@@ -124,7 +135,7 @@ Rectangle {
         ScrollView {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            visible: !isFinished && taskModel.count > 0
+            visible: taskModel.count > 0
             clip: true
             
             ListView {
