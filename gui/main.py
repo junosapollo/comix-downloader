@@ -18,6 +18,7 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QFontDatabase
 
 from gui.bridge import DiscoveryBridge, DownloadBridge, MangaBridge, SettingsBridge
+from gui.cover_image_provider import ComixCoverImageProvider, provider_name
 from src.utils.config import ConfigManager
 
 
@@ -71,6 +72,8 @@ def main():
     
     # Create QML engine
     engine = QQmlApplicationEngine()
+    cover_provider = ComixCoverImageProvider()
+    engine.addImageProvider(provider_name(), cover_provider)
     
     # Use one in-memory configuration source for all GUI bridges.  This keeps
     # settings changes visible to workers created later in the same session.

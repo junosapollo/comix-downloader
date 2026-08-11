@@ -7,6 +7,8 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from gui.cover_image_provider import cover_image_source
+
 
 def _summary_to_dict(summary) -> dict:
     """Convert a MangaSummary into a QML-friendly dictionary."""
@@ -15,6 +17,7 @@ def _summary_to_dict(summary) -> dict:
         "manga_code": summary.manga_code,
         "title": summary.title,
         "poster_url": summary.poster_url,
+        "poster_source": cover_image_source(summary.poster_url),
         "manga_type": summary.manga_type or "Unknown",
         "status": summary.status or "Unknown",
         "year": summary.year or 0,
@@ -135,4 +138,3 @@ class DiscoveryBridge(QObject):
         if self._loading:
             self._loading = False
             self.loadingChanged.emit(False)
-

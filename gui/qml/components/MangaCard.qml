@@ -72,7 +72,9 @@ Rectangle {
                 Image {
                     id: coverImage
                     anchors.fill: parent
-                    source: manga ? manga.poster_url : ""
+                    source: manga && manga.poster_source
+                            ? manga.poster_source
+                            : (manga ? (manga.poster_url || "") : "")
                     fillMode: Image.PreserveAspectFit  // Don't crop
                     
                     opacity: status === Image.Ready ? 1 : 0

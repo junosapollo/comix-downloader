@@ -38,7 +38,9 @@ Rectangle {
             Image {
                 id: cover
                 anchors.fill: parent
-                source: root.manga ? root.manga.poster_url : ""
+                source: root.manga && root.manga.poster_source
+                        ? root.manga.poster_source
+                        : (root.manga ? (root.manga.poster_url || "") : "")
                 fillMode: Image.PreserveAspectFit
                 asynchronous: true
                 opacity: status === Image.Ready ? 1 : 0
@@ -127,4 +129,3 @@ Rectangle {
         onClicked: root.opened(root.manga)
     }
 }
-

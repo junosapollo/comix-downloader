@@ -1,15 +1,30 @@
 import asyncio
 import unittest
 
-from src.utils.nodriver_browser import get_browser_args, start_browser
+from src.utils import nodriver_browser
+from src.utils.nodriver_browser import get_browser_args, normalize_desktop_user_agent, start_browser
 
 
 class FakeNodriver:
+    class Browser:
+        info = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36"
+            )
+        }
+
+        def stop(self):
+            return None
+
     class Config:
         def __init__(self, *, headless, browser_args):
             self.headless = headless
             self.browser_args = list(browser_args)
             self.browser_executable_path = "fake-browser"
+
+        def add_argument(self, argument):
+            self.browser_args.append(argument)
 
         def __call__(self):
             args = list(self.browser_args)
@@ -19,7 +34,7 @@ class FakeNodriver:
 
     def __init__(self):
         self.start_kwargs = None
-        self.browser = object()
+        self.browser = self.Browser()
 
     async def start(self, **kwargs):
         self.start_kwargs = kwargs
@@ -27,6 +42,15 @@ class FakeNodriver:
 
 
 class NodriverBrowserTests(unittest.TestCase):
+    def setUp(self):
+        nodriver_browser._user_agent_cache = None
+
+    def test_normalizes_only_headless_product_token(self):
+        raw = "Mozilla/5.0 Chrome/150.0.0.0 HeadlessChrome/150.0.0.0"
+        normalized = normalize_desktop_user_agent(raw)
+        self.assertNotIn("HeadlessChrome", normalized)
+        self.assertIn("Chrome/150.0.0.0", normalized)
+
     def test_windows_headless_hides_window_without_maximizing(self):
         args = get_browser_args(True, platform="win32")
 
@@ -57,13 +81,20 @@ class NodriverBrowserTests(unittest.TestCase):
 
         self.assertIs(browser, fake_nodriver.browser)
         self.assertEqual(fake_nodriver.start_kwargs["headless"], True)
+        user_agent_args = [
+            argument
+            for argument in fake_nodriver.start_kwargs["browser_args"]
+            if argument.startswith("--user-agent=")
+        ]
+        self.assertEqual(len(user_agent_args), 1)
+        self.assertNotIn("HeadlessChrome", user_agent_args[0])
         self.assertEqual(
-            fake_nodriver.start_kwargs["browser_args"],
+            fake_nodriver.start_kwargs["browser_args"][:-1],
             get_browser_args(True),
         )
         self.assertEqual(
             fake_nodriver.start_kwargs["config"](),
-            get_browser_args(True) + ["--headless=new"],
+            get_browser_args(True) + [user_agent_args[0], "--headless=new"],
         )
 
     def test_headful_effective_config_has_no_headless_switch(self):
@@ -74,6 +105,9 @@ class NodriverBrowserTests(unittest.TestCase):
         effective_args = fake_nodriver.start_kwargs["config"]()
         self.assertIn("--start-maximized", effective_args)
         self.assertFalse(any(arg.startswith("--headless") for arg in effective_args))
+        user_agent_args = [arg for arg in effective_args if arg.startswith("--user-agent=")]
+        self.assertEqual(len(user_agent_args), 1)
+        self.assertNotIn("HeadlessChrome", user_agent_args[0])
 
     def test_start_browser_fails_closed_when_headless_switch_is_missing(self):
         class BrokenConfig(FakeNodriver.Config):

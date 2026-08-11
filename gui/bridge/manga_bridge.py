@@ -9,6 +9,8 @@ from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from gui.cover_image_provider import cover_image_source
+
 
 class FetchWorker(QThread):
     """Background worker for fetching manga data."""
@@ -46,6 +48,7 @@ class FetchWorker(QThread):
                 "manga_type": manga.manga_type or "Unknown",
                 "status": manga.status or "Unknown",
                 "poster_url": manga.poster_url or "",
+                "poster_source": cover_image_source(manga.poster_url),
                 "final_chapter": manga.final_chapter or "",
                 "year": manga.year or 0,
                 "rated_avg": manga.rated_avg or 0,

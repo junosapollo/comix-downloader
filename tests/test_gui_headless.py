@@ -77,6 +77,21 @@ class GuiHeadlessConfigTests(unittest.TestCase):
         self.assertTrue(manga_info.call_args.kwargs["headless"])
         self.assertTrue(all_chapters.call_args.kwargs["headless"])
 
+    def test_fetch_worker_preserves_poster_url_and_adds_provider_source(self):
+        poster_url = "https://static.comix.to/40e8/i/9/fa/cover.jpg"
+        manga = MangaInfo(hash_id="abc", slug="example", title="Example", poster_url=poster_url)
+        worker = FetchWorker("https://comix.to/title/example", headless=True)
+        loaded = []
+        worker.finished.connect(loaded.append)
+
+        with patch.object(ComixAPI, "get_manga_info", return_value=manga), \
+                patch.object(ComixAPI, "get_all_chapters", return_value=[]):
+            worker.run()
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0]["poster_url"], poster_url)
+        self.assertTrue(loaded[0]["poster_source"].startswith("image://comix-cover/"))
+
     def test_discovery_bridge_uses_shared_config_manager(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_manager = self._config(tmpdir, headless=False)

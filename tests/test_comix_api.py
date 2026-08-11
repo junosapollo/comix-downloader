@@ -1,8 +1,12 @@
 import asyncio
+import json
 import importlib
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 
 def load_comix_api():
@@ -24,6 +28,7 @@ def load_comix_api():
 
 
 ComixAPI = load_comix_api()
+comix_module = importlib.import_module("src.api.comix")
 
 
 class FakePage:
@@ -38,7 +43,184 @@ class FakePage:
         return self.result
 
 
+class ChallengePage:
+    def __init__(self, *, clears: bool):
+        self.challenge = True
+        self.clears = clears
+
+    async def evaluate(self, script, **kwargs):
+        if script == "document.title":
+            return "Just a moment..." if self.challenge else "Comix - Read Comics online for free"
+        if "#challenge-running" in script:
+            return self.challenge
+        return not self.challenge
+
+    async def sleep(self, _seconds):
+        if self.clears:
+            self.challenge = False
+
+
+class StreamingInitialDataPage:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.index = 0
+
+    async def evaluate(self, script, **kwargs):
+        if "textContent" in script:
+            return self.payloads[min(self.index, len(self.payloads) - 1)]
+        raise AssertionError(f"Unexpected script: {script}")
+
+    async def sleep(self, _seconds):
+        self.index += 1
+        await asyncio.sleep(0)
+
+
 class ComixChapterTests(unittest.TestCase):
+    def test_wait_for_initial_data_ignores_truncated_stream(self):
+        manga_code = "mn6wm"
+        complete = json.dumps({
+            "queries": {
+                '["manga", "detail", "mn6wm"]': {
+                    "id": 42,
+                    "hasChapters": True,
+                }
+            }
+        })
+        page = StreamingInitialDataPage([
+            complete[:19],
+            complete[:97],
+            complete,
+        ])
+
+        result = asyncio.run(comix_module._wait_for_initial_data(
+            page,
+            operation="manga details",
+            manga_code=manga_code,
+            timeout=0.5,
+        ))
+
+        self.assertEqual(result["queries"]['["manga", "detail", "mn6wm"]']["id"], 42)
+        self.assertTrue(ComixAPI._manga_has_chapters(result, manga_code))
+
+    def test_wait_for_initial_data_reports_persistent_truncation(self):
+        page = StreamingInitialDataPage(['{"queries":{"manga":'])
+
+        with self.assertRaisesRegex(
+            comix_module.MangaInfoFetchError,
+            r"initial data did not become valid.*last payload length: 20.*position",
+        ):
+            asyncio.run(comix_module._wait_for_initial_data(
+                page,
+                operation="manga details",
+                manga_code="mn6wm",
+                timeout=0.02,
+            ))
+
+    def test_wait_for_initial_data_requires_requested_detail_query(self):
+        wrong_query = json.dumps({
+            "queries": {
+                '["manga", "detail", "other"]': {"id": 1},
+            }
+        })
+        page = StreamingInitialDataPage([wrong_query])
+
+        with self.assertRaisesRegex(comix_module.MangaInfoFetchError, "detail query for mn6wm"):
+            asyncio.run(comix_module._wait_for_initial_data(
+                page,
+                operation="manga details",
+                manga_code="mn6wm",
+                timeout=0.02,
+            ))
+
+    def test_get_manga_info_maps_validated_parsed_payload(self):
+        payload = {
+            "queries": {
+                '["manga", "detail", "mn6wm"]': {
+                    "id": 42,
+                    "hid": "hash42",
+                    "title": "Validated Manga",
+                    "url": "/title/mn6wm-validated-manga",
+                }
+            }
+        }
+
+        async def fetch(_cls, _manga_code, _headless):
+            return payload
+
+        with patch.object(ComixAPI, "_get_manga_info_async", new=classmethod(fetch)):
+            manga = ComixAPI.get_manga_info("mn6wm", headless=True)
+
+        self.assertEqual(manga.manga_id, 42)
+        self.assertEqual(manga.hash_id, "hash42")
+        self.assertEqual(manga.title, "Validated Manga")
+
+    def test_get_manga_info_preserves_actionable_fetch_error(self):
+        error = comix_module.MangaInfoFetchError("stream was incomplete")
+        async def fail_fetch(_cls, _manga_code, _headless):
+            raise error
+
+        with patch.object(ComixAPI, "_get_manga_info_async", new=classmethod(fail_fetch)):
+            with self.assertRaisesRegex(comix_module.MangaInfoFetchError, "stream was incomplete"):
+                ComixAPI.get_manga_info("mn6wm", headless=True)
+
+    def test_waits_for_transient_cloudflare_challenge_in_headless_mode(self):
+        page = ChallengePage(clears=True)
+
+        asyncio.run(comix_module._wait_for_comix_page(
+            page,
+            "Boolean(document.getElementById('initial-data'))",
+            headless=True,
+            operation="discovery",
+            timeout=0.1,
+        ))
+
+        self.assertFalse(page.challenge)
+
+    def test_cloudflare_timeout_is_actionable(self):
+        page = ChallengePage(clears=False)
+
+        with self.assertRaisesRegex(RuntimeError, "Cloudflare verification did not complete"):
+            asyncio.run(comix_module._wait_for_comix_page(
+                page,
+                "Boolean(document.getElementById('initial-data'))",
+                headless=True,
+                operation="discovery",
+                timeout=0.01,
+            ))
+
+    def test_title_containing_moment_is_not_misclassified(self):
+        class NormalPage(ChallengePage):
+            async def evaluate(self, script, **kwargs):
+                if script == "document.title":
+                    return "A Moment in Time"
+                if "#challenge-running" in script:
+                    return False
+                return True
+
+        asyncio.run(comix_module._wait_for_comix_page(
+            NormalPage(clears=False),
+            "Boolean(document.getElementById('initial-data'))",
+            headless=True,
+            operation="manga details",
+            timeout=0.1,
+        ))
+
+    def test_cookie_save_is_atomic_and_uses_canonical_path(self):
+        class CookieJar:
+            async def save(self, path, pattern=".*"):
+                Path(path).write_bytes(b"cookies")
+
+        class Browser:
+            cookies = CookieJar()
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "cf_cookies.dat"
+            with patch.object(comix_module, "_CANONICAL_COOKIE_FILE", target):
+                asyncio.run(comix_module._save_comix_cookies(Browser()))
+
+            self.assertEqual(target.read_bytes(), b"cookies")
+            self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+
     def test_normalizes_manga_summary_shape(self):
         summary = ComixAPI._normalize_manga_summary({
             "id": 42,

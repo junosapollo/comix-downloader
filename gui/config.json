@@ -8,5 +8,6 @@
   "retry_count": 3,
   "retry_delay": 2.0,
   "chapters_display_limit": 20,
-  "flaresolverr_url": "http://localhost:8191/v1"
+  "flaresolverr_url": "http://localhost:8191/v1",
+  "headless": true
 }
