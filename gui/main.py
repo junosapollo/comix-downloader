@@ -17,7 +17,10 @@ from PyQt6.QtQml import QQmlApplicationEngine
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QFontDatabase
 
-from gui.bridge import MangaBridge, DownloadBridge, SettingsBridge
+from gui.bridge import DiscoveryBridge, DownloadBridge, MangaBridge, SettingsBridge
+from gui.cover_image_provider import ComixCoverImageProvider, provider_name
+from src.utils.config import ConfigManager
+from src.utils.logger import setup_logging
 
 
 def load_fonts():
@@ -70,14 +73,21 @@ def main():
     
     # Create QML engine
     engine = QQmlApplicationEngine()
+    cover_provider = ComixCoverImageProvider()
+    engine.addImageProvider(provider_name(), cover_provider)
     
-    # Create bridge instances
-    manga_bridge = MangaBridge()
-    download_bridge = DownloadBridge()
-    settings_bridge = SettingsBridge()
+    # Use one in-memory configuration source for all GUI bridges.  This keeps
+    # settings changes visible to workers created later in the same session.
+    config_manager = ConfigManager()
+    setup_logging(enable=bool(config_manager.get("enable_logs", False)))
+    manga_bridge = MangaBridge(config_manager=config_manager)
+    discovery_bridge = DiscoveryBridge(config_manager=config_manager)
+    download_bridge = DownloadBridge(config_manager=config_manager)
+    settings_bridge = SettingsBridge(config_manager=config_manager)
     
     # Expose bridges to QML
     engine.rootContext().setContextProperty("MangaBridge", manga_bridge)
+    engine.rootContext().setContextProperty("DiscoveryBridge", discovery_bridge)
     engine.rootContext().setContextProperty("DownloadBridge", download_bridge)
     engine.rootContext().setContextProperty("SettingsBridge", settings_bridge)
     
@@ -100,4 +110,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

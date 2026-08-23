@@ -54,7 +54,12 @@ class DownloadWorker(QThread):
                 self.chapterProgress.emit(chapter_name, current, total)
             
             # Download the chapter
-            ch_downloader = ChapterDownloader(self.config, manga)
+            ch_downloader = ChapterDownloader(
+                self.config,
+                manga,
+                reader_service=getattr(self, "_reader_service", None),
+                image_pool=getattr(self, "_image_pool", None),
+            )
             success, message = ch_downloader.download_chapter(
                 chapter, 
                 on_image_progress=on_image_progress
@@ -91,7 +96,8 @@ class DownloadWorker(QThread):
     def run(self):
         try:
             from src.core.models import MangaInfo
-            from src.core.downloader import reset_downloads
+            from src.core.downloader import reset_downloads, ImageDownloadPool
+            from src.api.comix import ChapterReaderService
 
             reset_downloads()
             
@@ -122,20 +128,29 @@ class DownloadWorker(QThread):
             
             total = len(self.chapters)
             max_workers = self.config.max_chapter_workers
+
+            self._reader_service = ChapterReaderService(self.config.headless)
+            self._image_pool = ImageDownloadPool(self.config.max_image_workers)
             
             # Use ThreadPoolExecutor for concurrent downloads
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(self._download_single_chapter, ch, manga, total)
-                    for ch in self.chapters
-                ]
-                
-                # Wait for all to complete
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception:
-                        pass  # Errors already handled in _download_single_chapter
+            try:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [
+                        executor.submit(self._download_single_chapter, ch, manga, total)
+                        for ch in self.chapters
+                    ]
+
+                    # Wait for all to complete
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception:
+                            pass  # Errors are emitted by _download_single_chapter
+            finally:
+                self._image_pool.shutdown()
+                self._reader_service.close()
+                self._image_pool = None
+                self._reader_service = None
             
             self.finished.emit(self._successful, self._failed)
             
@@ -153,12 +168,15 @@ class DownloadBridge(QObject):
     downloadFinished = pyqtSignal(int, int)
     errorOccurred = pyqtSignal(str)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, config_manager=None):
         super().__init__(parent)
         self._worker = None
         # Import here to avoid circular imports
-        from src.utils.config import ConfigManager
-        self._config_manager = ConfigManager()
+        if config_manager is None:
+            from src.utils.config import ConfigManager
+
+            config_manager = ConfigManager()
+        self._config_manager = config_manager
     
     @pyqtSlot('QVariant', 'QVariant', str, str)
     def startDownload(self, manga: dict, chapters, format_type: str, scanlator: str):

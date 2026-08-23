@@ -8,7 +8,8 @@ from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, pyqtProperty
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.utils.config import ConfigManager
+from src.utils.config import ConfigManager, application_root, default_config_path
+from src.utils.logger import setup_logging
 
 
 class SettingsBridge(QObject):
@@ -17,9 +18,11 @@ class SettingsBridge(QObject):
     # Signals
     settingsChanged = pyqtSignal()
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, config_manager=None):
         super().__init__(parent)
-        self._config_manager = ConfigManager()
+        self._config_manager = (
+            config_manager if config_manager is not None else ConfigManager()
+        )
     
     # Output Format
     @pyqtProperty(str, notify=settingsChanged)
@@ -86,6 +89,8 @@ class SettingsBridge(QObject):
     def setValue(self, key: str, value):
         """Generic setter for any config value."""
         self._config_manager.set(key, value)
+        if key == "enable_logs":
+            setup_logging(enable=bool(value))
         self.settingsChanged.emit()
     
     @pyqtSlot(str, result='QVariant')
@@ -103,4 +108,6 @@ class SettingsBridge(QObject):
     def getDownloadPathAbsolute(self):
         """Get absolute path to downloads folder."""
         path = Path(self._config_manager.get("download_path", "downloads"))
+        if not path.is_absolute() and self._config_manager.config_path == default_config_path():
+            path = application_root() / path
         return str(path.absolute())

@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import unittest
+import types
 import zipfile
 from contextlib import contextmanager
 from io import BytesIO
@@ -15,7 +16,8 @@ import typer
 from PIL import Image
 
 from src.api.comix import ChapterImageFetchReport, ComixAPI
-from src.core.downloader import ChapterDownloader
+from src.core import downloader as downloader_module
+from src.core.downloader import ChapterDownloader, ImageDownloader
 from src.core.models import Chapter, DownloadConfig, MangaInfo, OutputFormat
 from src.formats.cbz import create_cbz_from_bytes
 from src.formats.pdf import create_pdf_from_bytes
@@ -131,6 +133,82 @@ class ChapterDownloaderTests(unittest.TestCase):
                 self.assertFalse(success)
                 self.assertIn("Incomplete download", message)
                 self.assertFalse(artifact.exists())
+
+    def test_failed_pages_are_recovered_from_refreshed_sources(self):
+        good = data_url(image_bytes((10, 20, 30)))
+        bad = "data:image/png;base64,not-valid-base64"
+        reports = iter([
+            ChapterImageFetchReport([good, bad], page_count=2),
+            ChapterImageFetchReport([good, good], page_count=2),
+        ])
+        ComixAPI.get_chapter_image_report = staticmethod(lambda *args, **kwargs: next(reports))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = DownloadConfig(
+                output_format=OutputFormat.IMAGES,
+                download_path=tmpdir,
+                max_image_workers=2,
+            )
+            manga = MangaInfo(hash_id="abc", slug="abc-title", title="Recovery Manga")
+            chapter = Chapter(chapter_id=11, number="1")
+            success, message = ChapterDownloader(config, manga).download_chapter(chapter)
+
+            self.assertTrue(success, message)
+            files = list((Path(tmpdir) / "Recovery Manga" / "Chapter_1").glob("*"))
+            self.assertEqual(len(files), 2)
+
+    def test_tls_eof_retries_with_a_reset_session(self):
+        class RequestException(Exception):
+            pass
+
+        class SSLError(RequestException):
+            pass
+
+        class ConnectionError(RequestException):
+            pass
+
+        class Timeout(RequestException):
+            pass
+
+        class HTTPError(RequestException):
+            pass
+
+        fake_requests = types.SimpleNamespace(
+            exceptions=types.SimpleNamespace(
+                RequestException=RequestException,
+                SSLError=SSLError,
+                ConnectionError=ConnectionError,
+                Timeout=Timeout,
+                HTTPError=HTTPError,
+            )
+        )
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return None
+            def raise_for_status(self): return None
+            def iter_content(self, chunk_size=8192): yield image_bytes()
+
+        class Session:
+            def __init__(self): self.calls = 0; self.resets = 0
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise SSLError("UNEXPECTED_EOF_WHILE_READING")
+                return Response()
+            def reset(self): self.resets += 1
+
+        session = Session()
+        config = DownloadConfig(max_image_workers=1, retry_count=1, retry_delay=0)
+        with patch.object(downloader_module, "requests", fake_requests), \
+                patch.object(downloader_module, "get_session", return_value=session):
+            index, data, error = ImageDownloader(config).download_image("https://cdn.example/page", 1)
+
+        self.assertEqual(index, 1)
+        self.assertIsNone(error)
+        self.assertIsNotNone(data)
+        self.assertEqual(session.calls, 2)
+        self.assertEqual(session.resets, 1)
 
     def test_cbz_success_includes_metadata(self):
         urls = [

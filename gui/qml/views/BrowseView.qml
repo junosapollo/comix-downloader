@@ -5,63 +5,221 @@ import "../components"
 
 Item {
     id: browseView
-    
-    // Properties passed from main
+
     property var mangaCard: null
     property var chapterList: null
     property var downloadControls: null
+    property bool detailMode: false
+    property string detailError: ""
+
+    function fetchUrl(url) {
+        detailMode = true
+        detailError = ""
+        mangaCardComp.manga = null
+        chapterListComp.setChapters([])
+        MangaBridge.fetchManga(url)
+    }
+
+    function search(query) {
+        query = (query || "").trim()
+        if (!query)
+            return
+        detailMode = false
+        detailError = ""
+        discoveryView.query = query
+        discoveryView.page = 1
+        discoveryView.results = []
+        DiscoveryBridge.search(query, 1)
+    }
+
+    function openManga(manga) {
+        if (!manga || !manga.canonical_url)
+            return
+        fetchUrl(manga.canonical_url)
+    }
+
+    function showManga(info) {
+        detailMode = true
+        detailError = ""
+        mangaCardComp.manga = info
+    }
+
+    function showChapters(chapters) {
+        chapterListComp.setChapters(chapters)
+    }
+
+    function showMangaError(error) {
+        detailMode = true
+        detailError = error || "Could not load manga information."
+    }
+
+    function returnToDiscovery() {
+        detailMode = false
+        detailError = ""
+    }
+
+    function retryDiscovery() {
+        if (discoveryView.searchMode)
+            DiscoveryBridge.search(discoveryView.query, discoveryView.page)
+        else
+            DiscoveryBridge.loadHighlights()
+    }
 
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 24
         spacing: 16
-        
-        // URL INPUT
+
         UrlInput {
+            id: inputBar
             Layout.fillWidth: true
             Layout.preferredHeight: 56
-            onFetchRequested: (url) => MangaBridge.fetchManga(url)
+            onFetchRequested: (url) => browseView.fetchUrl(url)
+            onSearchRequested: (query) => browseView.search(query)
         }
-        
-        // CONTENT AREA
-        RowLayout {
+
+        StackLayout {
+            id: contentStack
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 16
-            
-            // MANGA CARD
-            MangaCard {
-                id: mangaCardComp
-                Layout.preferredWidth: 280
-                Layout.fillHeight: true
-                visible: manga !== null
-                manga: null
-            }
-            
-            // CHAPTER LIST
-            ChapterList {
-                id: chapterListComp
+            currentIndex: browseView.detailMode ? 1 : 0
+
+            DiscoveryView {
+                id: discoveryView
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                onOpenManga: (manga) => browseView.openManga(manga)
+                onPageRequested: (nextPage) => DiscoveryBridge.search(query, nextPage)
+                onClearRequested: {
+                    query = ""
+                    results = []
+                    errorMessage = ""
+                    if (trending.length === 0 && latest.length === 0)
+                        DiscoveryBridge.loadHighlights()
+                }
+                onRetryRequested: browseView.retryDiscovery()
             }
-        }
-        
-        // DOWNLOAD CONTROLS
-        DownloadControls {
-            id: downloadControlsComp
-            Layout.fillWidth: true
-            Layout.preferredHeight: 100
-            scanlators: chapterListComp.getScanlators()
-            onSettingsClicked: settingsDrawer.isOpen = true
-            onFilterChanged: (filter) => chapterListComp.applyFilter(filter)
-            onDownloadClicked: {
-                var selected = chapterListComp.getSelectedChapters()
-                DownloadBridge.startDownload(mangaCardComp.manga, selected, SettingsBridge.outputFormat, scanlatorPreference)
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 12
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 34
+                    spacing: 10
+
+                    Rectangle {
+                        Layout.preferredWidth: 94
+                        Layout.preferredHeight: 32
+                        radius: 6
+                        color: backMouse.containsMouse ? "#252530" : "transparent"
+                        border.width: 1
+                        border.color: "#5C5C66"
+                        Text {
+                            anchors.centerIn: parent
+                            text: "← BACK"
+                            color: "#F5F5F0"
+                            font.pixelSize: 10
+                            font.weight: Font.Bold
+                            font.letterSpacing: 1
+                        }
+                        MouseArea {
+                            id: backMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: browseView.returnToDiscovery()
+                        }
+                    }
+
+                    Text {
+                        text: "MANGA DETAILS"
+                        color: "#8B8B99"
+                        font.pixelSize: 11
+                        font.weight: Font.Bold
+                        font.letterSpacing: 1
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 40
+                    radius: 7
+                    color: "#1C1C24"
+                    visible: browseView.detailError.length > 0
+                    Text {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 14
+                        verticalAlignment: Text.AlignVCenter
+                        text: browseView.detailError
+                        color: "#E57373"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 16
+
+                    MangaCard {
+                        id: mangaCardComp
+                        Layout.preferredWidth: 280
+                        Layout.fillHeight: true
+                        visible: manga !== null
+                        manga: null
+                    }
+
+                    ChapterList {
+                        id: chapterListComp
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                    }
+                }
+
+                DownloadControls {
+                    id: downloadControlsComp
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 100
+                    visible: mangaCardComp.manga !== null
+                    scanlators: chapterListComp.getScanlators()
+                    onSettingsClicked: settingsDrawer.isOpen = true
+                    onFilterChanged: (filter) => chapterListComp.applyFilter(filter)
+                    onDownloadClicked: {
+                        var selected = chapterListComp.getSelectedChapters()
+                        DownloadBridge.startDownload(mangaCardComp.manga, selected, SettingsBridge.outputFormat, scanlatorPreference)
+                    }
+                }
             }
         }
     }
-    
-    // Expose internal components to main.qml for connections
+
+    Connections {
+        target: DiscoveryBridge
+        function onHighlightsLoaded(payload) {
+            discoveryView.setHighlights(payload)
+        }
+        function onResultsLoaded(payload) {
+            if (payload && payload.query === discoveryView.query)
+                discoveryView.setResults(payload)
+        }
+        function onLoadingChanged(loading) {
+            discoveryView.loading = loading
+        }
+        function onErrorOccurred(error) {
+            discoveryView.showError(error)
+        }
+    }
+
+    Component.onCompleted: {
+        if (typeof DiscoveryBridge !== "undefined" && DiscoveryBridge)
+            DiscoveryBridge.loadHighlights()
+    }
+
     function getMangaCard() { return mangaCardComp }
     function getChapterList() { return chapterListComp }
     function getDownloadControls() { return downloadControlsComp }

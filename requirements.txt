@@ -4,4 +4,4 @@ requests
 Pillow
 reportlab
 pyqt6
-nodriver
+nodriver==0.50.3

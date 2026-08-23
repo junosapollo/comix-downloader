@@ -23,12 +23,13 @@
 | Feature | Description |
 |---------|-------------|
 | 🖥️ **Modern GUI** | Beautiful PyQt6/QML interface with dark theme |
+| 🔎 **Manga Discovery** | Search titles or browse trending/latest manga directly in the GUI |
 | 🎨 **Beautiful CLI** | Rich terminal interface with progress bars |
 | ⚡ **Concurrent Downloads** | Multi-threaded chapter and image downloads |
 | 📁 **Multiple Formats** | Export as **Images**, **PDF**, or **CBZ** |
 | 🎯 **Smart Selection** | Download single, range (`1-10`), or all chapters |
 | 🎨 **Scanlator Filter** | Filter and prefer specific scanlator groups |
-| ⚙️ **Persistent Settings** | All preferences saved to `config.json` |
+| ⚙️ **Persistent Settings** | CLI and GUI share one user settings file |
 
 ---
 
@@ -65,8 +66,8 @@ python gui/main.py
 python gui/main.py --cpu
 ```
 
-1. Paste a manga URL from comix.to
-2. Click **FETCH** to load manga info and chapters
+1. Search for a manga title in the Browse screen, or paste a manga URL from comix.to
+2. Select a discovery result (or click **FETCH** for a URL) to load manga info and chapters
 3. Select chapters and choose scanlator preference/filter
 4. Click **DOWNLOAD CHAPTERS**
 5. Access **⚙️ Settings** to configure format, output path, workers
@@ -85,6 +86,10 @@ python main.py download "https://comix.to/title/abc-manga-name" -c "1-10" -f cbz
 
 ## ⚙️ Settings
 
+Settings are stored in the platform user configuration directory so CLI and
+GUI launches use the same values regardless of the current working directory.
+The legacy root and `gui/config.json` files are imported once and left intact.
+
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Output Format | images / pdf / cbz | `images` |
@@ -92,7 +97,8 @@ python main.py download "https://comix.to/title/abc-manga-name" -c "1-10" -f cbz
 | Enable Logs | Show debug logging | `No` |
 | Download Path | Where to save downloads | `downloads` |
 | Max Chapter Workers | Concurrent chapter downloads | `3` |
-| Max Image Workers | Concurrent image downloads per chapter | `5` |
+| Max Image Workers | Application-wide concurrent image downloads | `5` |
+| Run Browser Headless | Hide the automation browser window | `Yes` |
 
 ---
 
@@ -103,7 +109,7 @@ comix-downloader/
 ├── main.py                 # CLI entry point
 ├── gui/
 │   ├── main.py             # GUI entry point
-│   ├── bridge/             # Python-QML bridges
+│   ├── bridge/             # Python-QML bridges (downloads, details, discovery)
 │   └── qml/                # QML UI components
 ├── src/
 │   ├── api/comix.py        # API wrapper
@@ -112,7 +118,7 @@ comix-downloader/
 │   ├── cli/                # CLI application
 │   └── utils/              # Config, logging, session, compatibility helpers
 ├── tests/                  # Unit tests
-└── config.json             # User settings
+└── config.json             # Legacy settings imported on first run
 ```
 
 ---
