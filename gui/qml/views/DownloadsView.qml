@@ -52,6 +52,7 @@ Item {
             id: progressPanel
             Layout.fillWidth: true
             Layout.fillHeight: true
+            bridge: typeof DownloadBridge !== "undefined" ? DownloadBridge : null
             
             // Make internal scrollview larger in this view
             visible: true

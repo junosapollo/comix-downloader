@@ -270,6 +270,7 @@ class CliConfigTests(unittest.TestCase):
 
             def __init__(self, config):
                 FakeDownloader.seen_config = config
+                self.last_failures = []
 
             def download_chapters(self, manga, selected, progress):
                 return 1, 0

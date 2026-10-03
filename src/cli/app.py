@@ -134,7 +134,7 @@ class ComixDownloaderApp:
                 )
             
             # Show summary
-            Display.show_download_summary(successful, failed, manga.title)
+            Display.show_download_summary(successful, failed, manga.title, failures=downloader.last_failures)
             
             # Show download location
             download_path = Path(config.download_path) / manga.get_safe_title()
@@ -211,7 +211,7 @@ def download(
                     manga, selected, progress
                 )
             
-            Display.show_download_summary(successful, failed, manga.title)
+            Display.show_download_summary(successful, failed, manga.title, failures=downloader.last_failures)
             
         except KeyboardInterrupt:
             cancel_downloads()

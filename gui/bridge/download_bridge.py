@@ -5,10 +5,13 @@ Download Bridge - Handles download operations between Python and QML
 import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Property
+from PyQt6.QtGui import QGuiApplication
 import threading
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from src.core.failures import classify_failure, format_chapter_numbers, CANCELLED
+
 
 
 class DownloadWorker(QThread):
@@ -16,6 +19,8 @@ class DownloadWorker(QThread):
     
     chapterProgress = pyqtSignal(str, int, int)  # chapter_name, current, total
     chapterComplete = pyqtSignal(str, bool, str)  # chapter_name, success, message
+    chapterFailed = pyqtSignal('QVariant')         # structured failure payload
+
     overallProgress = pyqtSignal(int, int)  # completed, total
     finished = pyqtSignal(int, int)  # successful, failed
     error = pyqtSignal(str)
@@ -29,6 +34,8 @@ class DownloadWorker(QThread):
         self._completed = 0
         self._successful = 0
         self._failed = 0
+        self._failed_chapters = []
+
     
     def _download_single_chapter(self, chapter_dict, manga, total):
         """Download a single chapter. Called from thread pool."""
@@ -47,7 +54,9 @@ class DownloadWorker(QThread):
                 pages_count=chapter_dict.get("pages_count", 0)
             )
             
+            # Build the display name before anything can raise
             chapter_name = chapter.get_display_name()
+
             
             # Create a callback for image progress
             def on_image_progress(current, total):
@@ -78,20 +87,40 @@ class DownloadWorker(QThread):
             
             # Emit signals (Qt handles thread safety for signals)
             self.chapterComplete.emit(chapter_name, success, message)
+            if not success:
+                self._record_failure(chapter_dict, chapter_name, message)
             self.overallProgress.emit(completed, total)
             
             return success, chapter_name
             
         except Exception as e:
-            chapter_name = f"Chapter {chapter_dict.get('number', '?')}"
             with self._lock:
                 self._completed += 1
                 self._failed += 1
                 completed = self._completed
             
             self.chapterComplete.emit(chapter_name, False, str(e))
+            self._record_failure(chapter_dict, chapter_name, str(e))
             self.overallProgress.emit(completed, total)
             return False, chapter_name
+            
+    def _record_failure(self, chapter_dict, name, message):
+        category, label = classify_failure(message)
+        if category == CANCELLED:
+            return
+        payload = {
+            "name": name,
+            "chapter_id": chapter_dict.get("chapter_id"),
+            "number": str(chapter_dict.get("number", "?")),
+            "group_name": chapter_dict.get("group_name") or "",
+            "category": category,
+            "reason": label,
+            "message": message or "Failed",
+        }
+        with self._lock:
+            self._failed_chapters.append(dict(chapter_dict))
+        self.chapterFailed.emit(payload)
+
     
     def run(self):
         try:
@@ -164,19 +193,26 @@ class DownloadBridge(QObject):
     downloadStarted = pyqtSignal()
     chapterProgress = pyqtSignal(str, int, int)
     chapterComplete = pyqtSignal(str, bool, str)
+    chapterFailed = pyqtSignal('QVariant')
     overallProgress = pyqtSignal(int, int)
     downloadFinished = pyqtSignal(int, int)
     errorOccurred = pyqtSignal(str)
+    hasFailuresChanged = pyqtSignal()
+
     
     def __init__(self, parent=None, config_manager=None):
         super().__init__(parent)
         self._worker = None
+        self._last_manga = None
+        self._last_config = None
+        self._last_failed = []
         # Import here to avoid circular imports
         if config_manager is None:
             from src.utils.config import ConfigManager
 
             config_manager = ConfigManager()
         self._config_manager = config_manager
+
     
     @pyqtSlot('QVariant', 'QVariant', str, str)
     def startDownload(self, manga: dict, chapters, format_type: str, scanlator: str):
@@ -237,18 +273,70 @@ class DownloadBridge(QObject):
         
         self.downloadStarted.emit()
         
+        self._last_manga = manga
+        self._last_config = config
+        self._last_failed = []
+        self.hasFailuresChanged.emit()
+
         # Create and start worker with concurrent downloads
         self._worker = DownloadWorker(manga, chapters, config)
         self._worker.chapterProgress.connect(self.chapterProgress.emit)
         self._worker.chapterComplete.connect(self.chapterComplete.emit)
+        self._worker.chapterFailed.connect(self.chapterFailed.emit)
         self._worker.overallProgress.connect(self.overallProgress.emit)
-        self._worker.finished.connect(self.downloadFinished.emit)
+        self._worker.finished.connect(self._on_worker_finished)
         self._worker.error.connect(self.errorOccurred.emit)
         self._worker.start()
     
+    def _on_worker_finished(self, successful, failed):
+        if self._worker:
+            self._last_failed = self._worker._failed_chapters
+            self.hasFailuresChanged.emit()
+        self.downloadFinished.emit(successful, failed)
+
     @pyqtSlot()
     def cancelDownload(self):
         """Cancel the current download."""
         if self._worker and self._worker.isRunning():
             from src.core.downloader import cancel_downloads
             cancel_downloads()
+
+    @pyqtSlot(result=bool)
+    def hasFailures(self):
+        return len(self._last_failed) > 0
+    hasFailures = Property(bool, fget=hasFailures, notify=hasFailuresChanged)
+
+    @pyqtSlot()
+    def retryFailed(self):
+        """Retry the failed chapters from the last download."""
+        if self._worker and self._worker.isRunning():
+            self.errorOccurred.emit("A download is already in progress")
+            return
+        if not self._last_failed:
+            self.errorOccurred.emit("No failed chapters to retry")
+            return
+        
+        self.downloadStarted.emit()
+        self._last_failed = []
+        self.hasFailuresChanged.emit()
+
+        self._worker = DownloadWorker(self._last_manga, self._last_failed, self._last_config)
+        self._worker.chapterProgress.connect(self.chapterProgress.emit)
+        self._worker.chapterComplete.connect(self.chapterComplete.emit)
+        self._worker.chapterFailed.connect(self.chapterFailed.emit)
+        self._worker.overallProgress.connect(self.overallProgress.emit)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.error.connect(self.errorOccurred.emit)
+        self._worker.start()
+
+    @pyqtSlot('QVariant', result=str)
+    def formatChapterNumbers(self, numbers):
+        if hasattr(numbers, 'toVariant'):
+            numbers = numbers.toVariant()
+        return format_chapter_numbers(numbers)
+
+    @pyqtSlot(str)
+    def copyToClipboard(self, text):
+        clipboard = QGuiApplication.clipboard()
+        if clipboard:
+            clipboard.setText(text)

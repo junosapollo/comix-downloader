@@ -106,6 +106,9 @@ ApplicationWindow {
         function onChapterComplete(name, success, message) { 
             downloadsView.getProgressPanel().setChapterStatus(name, success, message) 
         }
+        function onChapterFailed(payload) {
+            downloadsView.getProgressPanel().addFailure(payload)
+        }
         function onDownloadFinished(successful, failed) { 
             downloadsView.getProgressPanel().setFinished(successful, failed) 
         }

@@ -524,8 +524,10 @@ class MangaDownloader:
     
     def __init__(self, config: DownloadConfig):
         self.config = config
-    
+        self.last_failures: list[tuple[Chapter, str]] = []
+        
     def download_chapters(
+
         self,
         manga: MangaInfo,
         chapters: list[Chapter],
@@ -540,9 +542,12 @@ class MangaDownloader:
         """
         successful = 0
         failed = 0
+        self.last_failures = []
         reset_downloads()
         
         from ..api.comix import ChapterReaderService
+        from ..core.failures import is_cancellation
+
 
         reader_service = ChapterReaderService(self.config.headless)
         image_pool = ImageDownloadPool(self.config.max_image_workers)
@@ -581,15 +586,21 @@ class MangaDownloader:
                             successful += 1
                         else:
                             failed += 1
+                            if not is_cancellation(message):
+                                self.last_failures.append((chapter, message))
 
                         if on_chapter_complete:
+
                             on_chapter_complete(chapter, success, message)
 
                     except Exception as e:
                         failed += 1
+                        error_msg = str(e)
+                        self.last_failures.append((chapter, error_msg))
                         logger.error("Exception downloading chapter %s: %s", chapter.number, e)
                         if on_chapter_complete:
-                            on_chapter_complete(chapter, False, str(e))
+                            on_chapter_complete(chapter, False, error_msg)
+
 
                     progress.advance(main_task)
         finally:

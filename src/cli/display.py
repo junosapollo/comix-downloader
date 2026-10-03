@@ -158,9 +158,11 @@ class Display:
         console.print(table)
     
     @staticmethod
-    def show_download_summary(successful: int, failed: int, manga_title: str):
+    def show_download_summary(successful: int, failed: int, manga_title: str, failures: list[tuple[Chapter, str]] = None):
         """Display download summary."""
+        from ..core.failures import classify_failure, format_chapter_numbers
         total = successful + failed
+
         
         if failed == 0:
             style = "bold green"
@@ -190,6 +192,27 @@ class Display:
             box=box.ROUNDED
         )
         console.print(panel)
+
+        if failures:
+            console.print()
+            failed_nums = [ch.number for ch, _ in failures]
+            num_str = format_chapter_numbers(failed_nums)
+            console.print(f"[bold red]Failed chapters:[/] {num_str}")
+            
+            ftable = Table(box=box.ROUNDED, border_style="red")
+            ftable.add_column("Chapter", style="cyan")
+            ftable.add_column("Reason", style="red bold")
+            ftable.add_column("Message", style="white")
+            
+            display_limit = 50
+            for ch, msg in failures[:display_limit]:
+                _, reason = classify_failure(msg)
+                ftable.add_row(str(ch.number), reason, msg)
+                
+            console.print(ftable)
+            if len(failures) > display_limit:
+                console.print(f"[dim]... and {len(failures) - display_limit} more failures not shown.[/]")
+
     
     @staticmethod
     def error(message: str):
